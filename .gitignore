@@ -1,0 +1,46 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Secrets / env files (keep *.example committed)
+*.env
+.env
+.env.*
+!*.env.example
+!.env.example
+backend/dev.env
+
+# Go build artifacts
+backend/backend
+*.exe
+*.test
+*.out
+vendor/
+
+# Databases / local data
+*.db
+*.sqlite
+*.sqlite3
+backend/users.db
+backend/data/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Frontend build output
+frontend/dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# Go cache
+go-build/
