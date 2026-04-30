@@ -22,6 +22,7 @@ RUN apk add --no-cache ca-certificates tzdata \
 
 COPY --from=build /out/app /usr/local/bin/app
 COPY run-both.sh /usr/local/bin/run-both.sh
+RUN chmod +x /usr/local/bin/run-both.sh
 
 USER app
 WORKDIR /home/app
