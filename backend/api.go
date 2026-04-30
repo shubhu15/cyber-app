@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -77,24 +78,24 @@ type uploadStatusResponse struct {
 type resultsResponse struct {
 	Upload   uploadStatusResponse `json:"upload"`
 	Summary  summaryPayload       `json:"summary"`
-	Findings []findingPayload     `json:"findings"`
+	Findings []severityBucket     `json:"findings"`
 	Timeline []timelineEntry      `json:"timeline"`
 	Charts   chartData            `json:"charts"`
-	Events   []eventPayload       `json:"events"`
 }
 
 type summaryPayload struct {
-	TotalRecords  int    `json:"total_records"`
-	AcceptedCount int    `json:"accepted_count"`
-	RejectedCount int    `json:"rejected_count"`
-	ParseErrors   int    `json:"parse_errors"`
-	AISummary     string `json:"ai_summary"`
+	TotalLines     int    `json:"total_lines"`
+	TotalRecords   int    `json:"total_records"`
+	ParsedPercent  int    `json:"parsed_percent"`
+	AcceptedCount  int    `json:"accepted_count"`
+	RejectedCount  int    `json:"rejected_count"`
+	NoDataCount    int    `json:"nodata_count"`
+	SkipDataCount  int    `json:"skipdata_count"`
+	ParseErrors    int    `json:"parse_errors"`
+	AISummary      string `json:"ai_summary"`
 }
 
-type findingPayload struct {
-	Type        string         `json:"type"`
-	Severity    string         `json:"severity"`
-	Title       string         `json:"title"`
+type findingInstance struct {
 	Description string         `json:"description"`
 	FirstSeenAt *string        `json:"first_seen_at,omitempty"`
 	LastSeenAt  *string        `json:"last_seen_at,omitempty"`
@@ -102,24 +103,18 @@ type findingPayload struct {
 	Metadata    map[string]any `json:"metadata"`
 }
 
-type eventPayload struct {
-	ID            int64   `json:"id"`
-	Version       int     `json:"version"`
-	AccountID     string  `json:"account_id,omitempty"`
-	InterfaceID   string  `json:"interface_id,omitempty"`
-	SrcAddr       string  `json:"src_addr,omitempty"`
-	DstAddr       string  `json:"dst_addr,omitempty"`
-	SrcPort       *int    `json:"src_port,omitempty"`
-	DstPort       *int    `json:"dst_port,omitempty"`
-	Protocol      *int    `json:"protocol,omitempty"`
-	ProtocolLabel string  `json:"protocol_label"`
-	Packets       *int64  `json:"packets,omitempty"`
-	Bytes         *int64  `json:"bytes,omitempty"`
-	StartTime     *string `json:"start_time,omitempty"`
-	EndTime       *string `json:"end_time,omitempty"`
-	Action        string  `json:"action,omitempty"`
-	LogStatus     string  `json:"log_status"`
-	RawLine       string  `json:"raw_line"`
+type findingGroup struct {
+	Type          string            `json:"type"`
+	Severity      string            `json:"severity"`
+	Title         string            `json:"title"`
+	InstanceCount int               `json:"instance_count"`
+	TotalCount    int               `json:"total_count"`
+	Instances     []findingInstance `json:"instances"`
+}
+
+type severityBucket struct {
+	Severity string         `json:"severity"`
+	Groups   []findingGroup `json:"groups"`
 }
 
 func (app *application) routes() http.Handler {
@@ -364,7 +359,7 @@ func (app *application) handleCreateUpload(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, messageResponse{Message: "Upload exactly one flow-log file."})
 		return
 	}
-
+	// todo: make log type as dropdown in frontend and validate here, for now we only support VPC flow logs so we can default to that if not provided
 	logType := strings.TrimSpace(r.FormValue("log_type"))
 	if logType == "" {
 		logType = logTypeVPC
@@ -462,14 +457,11 @@ func (app *application) handleUploadResults(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusInternalServerError, messageResponse{Message: "Unable to read upload summary."})
 		return
 	}
+	summary.TotalLines = status.TotalLines
+	summary.ParsedPercent = computeParsedPercent(status.TotalLines, summary.TotalRecords)
 	findings, err := app.fetchFindings(r.Context(), uploadID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, messageResponse{Message: "Unable to read findings."})
-		return
-	}
-	events, err := app.fetchEvents(r.Context(), uploadID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, messageResponse{Message: "Unable to read events."})
 		return
 	}
 
@@ -479,7 +471,6 @@ func (app *application) handleUploadResults(w http.ResponseWriter, r *http.Reque
 		Findings: findings,
 		Timeline: timeline,
 		Charts:   charts,
-		Events:   events,
 	})
 }
 
@@ -511,6 +502,20 @@ func (app *application) fetchUploadStatus(ctx context.Context, userID, uploadID 
 	return status, true, nil
 }
 
+func computeParsedPercent(totalLines, parsedLines int) int {
+	if totalLines <= 0 {
+		return 0
+	}
+	value := (parsedLines * 100) / totalLines
+	if value > 100 {
+		return 100
+	}
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
 func computeProgressPercentage(status string, totalLines, parsedLines int) int {
 	switch status {
 	case "completed":
@@ -539,24 +544,23 @@ func computeProgressPercentage(status string, totalLines, parsedLines int) int {
 func (app *application) fetchSummary(ctx context.Context, uploadID int64) (summaryPayload, []timelineEntry, chartData, error) {
 	row := app.db.QueryRowContext(ctx, `
 		SELECT total_records, accepted_count, rejected_count, parse_errors,
-		       top_src_ips_json, top_dst_ports_json, top_rejected_src_ips_json, timeline_json, ai_summary
+		       nodata_count, skipdata_count,
+		       charts_json, timeline_json, ai_summary
 		FROM summaries
 		WHERE upload_id = $1
 	`, uploadID)
 
 	var payload summaryPayload
-	var topSrcJSON string
-	var topDstPortsJSON string
-	var topRejectedSrcJSON string
+	var chartsJSON string
 	var timelineJSON string
 	if err := row.Scan(
 		&payload.TotalRecords,
 		&payload.AcceptedCount,
 		&payload.RejectedCount,
 		&payload.ParseErrors,
-		&topSrcJSON,
-		&topDstPortsJSON,
-		&topRejectedSrcJSON,
+		&payload.NoDataCount,
+		&payload.SkipDataCount,
+		&chartsJSON,
 		&timelineJSON,
 		&payload.AISummary,
 	); err != nil {
@@ -571,96 +575,28 @@ func (app *application) fetchSummary(ctx context.Context, uploadID int64) (summa
 		timeline = []timelineEntry{}
 	}
 
-	var topSrcIPs []chartPoint
-	if err := json.Unmarshal([]byte(topSrcJSON), &topSrcIPs); err != nil {
-		return summaryPayload{}, nil, chartData{}, err
+	var charts chartData
+	if strings.TrimSpace(chartsJSON) != "" {
+		if err := json.Unmarshal([]byte(chartsJSON), &charts); err != nil {
+			return summaryPayload{}, nil, chartData{}, err
+		}
 	}
-	var topDstPorts []chartPoint
-	if err := json.Unmarshal([]byte(topDstPortsJSON), &topDstPorts); err != nil {
-		return summaryPayload{}, nil, chartData{}, err
+	charts.TopSrcIPs = ensureChartPoints(charts.TopSrcIPs)
+	charts.TopDstPorts = ensureChartPoints(charts.TopDstPorts)
+	charts.TopRejectedSrcIPs = ensureChartPoints(charts.TopRejectedSrcIPs)
+	charts.TopInterfaces = ensureChartPoints(charts.TopInterfaces)
+	charts.TopTalkersByBytes = ensureChartPoints(charts.TopTalkersByBytes)
+	if charts.TopConversations == nil {
+		charts.TopConversations = []conversation{}
 	}
-	var topRejected []chartPoint
-	if err := json.Unmarshal([]byte(topRejectedSrcJSON), &topRejected); err != nil {
-		return summaryPayload{}, nil, chartData{}, err
+	if charts.InternalExternal == nil {
+		charts.InternalExternal = []internalExternalBucket{}
 	}
-
-	topInterfaces, err := app.fetchTopInterfaces(ctx, uploadID)
-	if err != nil {
-		return summaryPayload{}, nil, chartData{}, err
-	}
-	burstWindows, err := app.fetchBurstWindows(ctx, uploadID)
-	if err != nil {
-		return summaryPayload{}, nil, chartData{}, err
-	}
-
-	charts := chartData{
-		ActionCounts: []chartPoint{
-			{Label: actionAccept, Count: int64(payload.AcceptedCount)},
-			{Label: actionReject, Count: int64(payload.RejectedCount)},
-		},
-		TopSrcIPs:         ensureChartPoints(topSrcIPs),
-		TopDstPorts:       ensureChartPoints(topDstPorts),
-		TopRejectedSrcIPs: ensureChartPoints(topRejected),
-		TopInterfaces:     ensureChartPoints(topInterfaces),
-		BurstWindows:      burstWindows,
+	if charts.BurstWindows == nil {
+		charts.BurstWindows = []burstWindow{}
 	}
 
 	return payload, timeline, charts, nil
-}
-
-func (app *application) fetchTopInterfaces(ctx context.Context, uploadID int64) ([]chartPoint, error) {
-	rows, err := app.db.QueryContext(ctx, `
-		SELECT interface_id, COUNT(*)
-		FROM event_logs
-		WHERE upload_id = $1 AND interface_id IS NOT NULL AND interface_id <> ''
-		GROUP BY interface_id
-		ORDER BY COUNT(*) DESC, interface_id ASC
-		LIMIT 10
-	`, uploadID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	points := make([]chartPoint, 0)
-	for rows.Next() {
-		var label string
-		var count int64
-		if err := rows.Scan(&label, &count); err != nil {
-			return nil, err
-		}
-		points = append(points, chartPoint{Label: label, Count: count})
-	}
-	return points, nil
-}
-
-func (app *application) fetchBurstWindows(ctx context.Context, uploadID int64) ([]burstWindow, error) {
-	rows, err := app.db.QueryContext(ctx, `
-		SELECT (FLOOR(EXTRACT(EPOCH FROM start_time) / 300)::BIGINT * 300) AS bucket_epoch, COUNT(*)
-		FROM event_logs
-		WHERE upload_id = $1 AND start_time IS NOT NULL
-		GROUP BY bucket_epoch
-		ORDER BY COUNT(*) DESC, bucket_epoch ASC
-		LIMIT 6
-	`, uploadID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	windows := make([]burstWindow, 0)
-	for rows.Next() {
-		var epoch int64
-		var count int64
-		if err := rows.Scan(&epoch, &count); err != nil {
-			return nil, err
-		}
-		windows = append(windows, burstWindow{
-			Bucket: time.Unix(epoch, 0).UTC().Format(time.RFC3339),
-			Count:  count,
-		})
-	}
-	return windows, nil
 }
 
 func ensureChartPoints(points []chartPoint) []chartPoint {
@@ -670,126 +606,103 @@ func ensureChartPoints(points []chartPoint) []chartPoint {
 	return points
 }
 
-func (app *application) fetchFindings(ctx context.Context, uploadID int64) ([]findingPayload, error) {
+func (app *application) fetchFindings(ctx context.Context, uploadID int64) ([]severityBucket, error) {
 	rows, err := app.db.QueryContext(ctx, `
 		SELECT type, severity, title, description, first_seen_at, last_seen_at, count, metadata_json
 		FROM findings
 		WHERE upload_id = $1
+		  AND type IN ($2, $3, $4)
 		ORDER BY count DESC, created_at ASC
-	`, uploadID)
+	`, uploadID, findingRejectedTraffic, findingHighPortScan, findingSensitivePort)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	findings := make([]findingPayload, 0)
+	type groupKey struct {
+		severity string
+		typeKey  string
+	}
+	groups := make(map[groupKey]*findingGroup)
+	groupOrder := make([]groupKey, 0)
+
 	for rows.Next() {
-		var finding findingPayload
-		var firstSeen sql.NullTime
-		var lastSeen sql.NullTime
-		var metadataJSON string
-		if err := rows.Scan(&finding.Type, &finding.Severity, &finding.Title, &finding.Description, &firstSeen, &lastSeen, &finding.Count, &metadataJSON); err != nil {
+		var (
+			typeValue    string
+			severity     string
+			title        string
+			description  string
+			firstSeen    sql.NullTime
+			lastSeen     sql.NullTime
+			count        int
+			metadataJSON string
+		)
+		if err := rows.Scan(&typeValue, &severity, &title, &description, &firstSeen, &lastSeen, &count, &metadataJSON); err != nil {
 			return nil, err
+		}
+
+		instance := findingInstance{
+			Description: description,
+			Count:       count,
+			Metadata:    map[string]any{},
 		}
 		if firstSeen.Valid {
 			value := firstSeen.Time.UTC().Format(time.RFC3339)
-			finding.FirstSeenAt = &value
+			instance.FirstSeenAt = &value
 		}
 		if lastSeen.Valid {
 			value := lastSeen.Time.UTC().Format(time.RFC3339)
-			finding.LastSeenAt = &value
+			instance.LastSeenAt = &value
 		}
-		if strings.TrimSpace(metadataJSON) == "" {
-			finding.Metadata = map[string]any{}
-		} else if err := json.Unmarshal([]byte(metadataJSON), &finding.Metadata); err != nil {
-			return nil, err
+		if strings.TrimSpace(metadataJSON) != "" {
+			if err := json.Unmarshal([]byte(metadataJSON), &instance.Metadata); err != nil {
+				return nil, err
+			}
+			if instance.Metadata == nil {
+				instance.Metadata = map[string]any{}
+			}
 		}
-		if finding.Metadata == nil {
-			finding.Metadata = map[string]any{}
+
+		key := groupKey{severity: severity, typeKey: typeValue}
+		group, exists := groups[key]
+		if !exists {
+			group = &findingGroup{
+				Type:      typeValue,
+				Severity:  severity,
+				Title:     title,
+				Instances: make([]findingInstance, 0),
+			}
+			groups[key] = group
+			groupOrder = append(groupOrder, key)
 		}
-		findings = append(findings, finding)
+		group.InstanceCount++
+		group.TotalCount += count
+		if len(group.Instances) < topNLimit {
+			group.Instances = append(group.Instances, instance)
+		}
 	}
-	return findings, nil
-}
 
-func (app *application) fetchEvents(ctx context.Context, uploadID int64) ([]eventPayload, error) {
-	rows, err := app.db.QueryContext(ctx, `
-		SELECT id, version, COALESCE(account_id, ''), COALESCE(interface_id, ''), COALESCE(src_addr, ''),
-		       COALESCE(dst_addr, ''), src_port, dst_port, protocol, packets, bytes, start_time, end_time,
-		       COALESCE(action, ''), log_status, raw_line
-		FROM event_logs
-		WHERE upload_id = $1
-		ORDER BY start_time ASC NULLS LAST, id ASC
-	`, uploadID)
-	if err != nil {
-		return nil, err
+	bySeverity := make(map[string][]findingGroup)
+	severityOrder := make([]string, 0)
+	for _, key := range groupOrder {
+		if _, exists := bySeverity[key.severity]; !exists {
+			severityOrder = append(severityOrder, key.severity)
+		}
+		bySeverity[key.severity] = append(bySeverity[key.severity], *groups[key])
 	}
-	defer rows.Close()
 
-	events := make([]eventPayload, 0)
-	for rows.Next() {
-		var event eventPayload
-		var srcPort sql.NullInt64
-		var dstPort sql.NullInt64
-		var protocol sql.NullInt64
-		var packets sql.NullInt64
-		var bytesValue sql.NullInt64
-		var startTime sql.NullTime
-		var endTime sql.NullTime
+	sort.SliceStable(severityOrder, func(i, j int) bool {
+		return findingSeverityRank(severityOrder[i]) > findingSeverityRank(severityOrder[j])
+	})
 
-		if err := rows.Scan(
-			&event.ID,
-			&event.Version,
-			&event.AccountID,
-			&event.InterfaceID,
-			&event.SrcAddr,
-			&event.DstAddr,
-			&srcPort,
-			&dstPort,
-			&protocol,
-			&packets,
-			&bytesValue,
-			&startTime,
-			&endTime,
-			&event.Action,
-			&event.LogStatus,
-			&event.RawLine,
-		); err != nil {
-			return nil, err
-		}
-
-		if srcPort.Valid {
-			value := int(srcPort.Int64)
-			event.SrcPort = &value
-		}
-		if dstPort.Valid {
-			value := int(dstPort.Int64)
-			event.DstPort = &value
-		}
-		if protocol.Valid {
-			value := int(protocol.Int64)
-			event.Protocol = &value
-		}
-		if packets.Valid {
-			value := packets.Int64
-			event.Packets = &value
-		}
-		if bytesValue.Valid {
-			value := bytesValue.Int64
-			event.Bytes = &value
-		}
-		if startTime.Valid {
-			value := startTime.Time.UTC().Format(time.RFC3339)
-			event.StartTime = &value
-		}
-		if endTime.Valid {
-			value := endTime.Time.UTC().Format(time.RFC3339)
-			event.EndTime = &value
-		}
-		event.ProtocolLabel = protocolLabel(event.Protocol)
-		events = append(events, event)
+	buckets := make([]severityBucket, 0, len(severityOrder))
+	for _, severity := range severityOrder {
+		buckets = append(buckets, severityBucket{
+			Severity: severity,
+			Groups:   bySeverity[severity],
+		})
 	}
-	return events, nil
+	return buckets, nil
 }
 
 func (app *application) createUploadRow(ctx context.Context, userID int64, fileName, logType string) (int64, error) {

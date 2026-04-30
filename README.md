@@ -47,7 +47,6 @@ That script will:
 
 Open four terminals from the project root.
 
-You do not need to run `set -a` or `source dev.env` manually anymore.
 
 ### 1. Start Postgres
 

@@ -224,6 +224,28 @@ func initializeDatabase(ctx context.Context, db *sql.DB) error {
 			) THEN
 				ALTER TABLE summaries ADD COLUMN ai_summary TEXT NOT NULL DEFAULT '';
 			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'nodata_count'
+			) THEN
+				ALTER TABLE summaries ADD COLUMN nodata_count INTEGER NOT NULL DEFAULT 0;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'skipdata_count'
+			) THEN
+				ALTER TABLE summaries ADD COLUMN skipdata_count INTEGER NOT NULL DEFAULT 0;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'charts_json'
+			) THEN
+				ALTER TABLE summaries ADD COLUMN charts_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+			END IF;
+			ALTER TABLE summaries ALTER COLUMN top_src_ips_json DROP NOT NULL;
+			ALTER TABLE summaries ALTER COLUMN top_dst_ports_json DROP NOT NULL;
+			ALTER TABLE summaries ALTER COLUMN top_rejected_src_ips_json DROP NOT NULL;
+			ALTER TABLE summaries ALTER COLUMN timeline_json DROP NOT NULL;
 		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_uploads_user_created_at ON uploads(user_id, created_at DESC)`,

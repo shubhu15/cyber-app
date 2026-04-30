@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -9,12 +10,48 @@ import (
 )
 
 const (
+	burstBucketSeconds = 300
+
+	bucketInternalToInternal = "internal_to_internal"
+	bucketInternalToExternal = "internal_to_external"
+	bucketExternalToInternal = "external_to_internal"
+	bucketExternalToExternal = "external_to_external"
+)
+
+var rfc1918Networks = func() []*net.IPNet {
+	cidrs := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		nets = append(nets, network)
+	}
+	return nets
+}()
+
+func isInternalIP(value string) bool {
+	if value == "" {
+		return false
+	}
+	ip := net.ParseIP(strings.TrimSpace(value))
+	if ip == nil {
+		return false
+	}
+	for _, network := range rfc1918Networks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+const (
 	logTypeVPC               = "vpc_flow"
 	findingRejectedTraffic   = "REJECTED_TRAFFIC"
-	findingTopTalker         = "TOP_TALKER"
 	findingHighPortScan      = "HIGH_PORT_SCAN"
 	findingSensitivePort     = "SENSITIVE_PORT_TRAFFIC"
-	findingVisibilityGap     = "VISIBILITY_GAP"
 	actionAccept             = "ACCEPT"
 	actionReject             = "REJECT"
 	logStatusOK              = "OK"
@@ -24,9 +61,7 @@ const (
 	sensitivePortThreshold   = 3
 	portScanPortThreshold    = 10
 	portScanFlowThreshold    = 10
-	topTalkerLimit           = 3
-	timelineLimit            = 12
-	findingLimit             = 10
+	topNLimit                = 5
 )
 
 var sensitivePorts = map[int]struct{}{
@@ -56,14 +91,13 @@ type parsedVpcFlowLine struct {
 }
 
 type timelineEntry struct {
-	Timestamp   string `json:"timestamp"`
-	Type        string `json:"type"`
-	Severity    string `json:"severity"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	SrcAddr     string `json:"src_addr,omitempty"`
-	DstPort     *int   `json:"dst_port,omitempty"`
-	Count       int    `json:"count,omitempty"`
+	Type          string `json:"type"`
+	Severity      string `json:"severity"`
+	Title         string `json:"title"`
+	FirstSeenAt   string `json:"first_seen_at"`
+	LastSeenAt    string `json:"last_seen_at"`
+	InstanceCount int    `json:"instance_count"`
+	TotalCount    int    `json:"total_count"`
 }
 
 type chartPoint struct {
@@ -76,13 +110,29 @@ type burstWindow struct {
 	Count  int64  `json:"count"`
 }
 
+type conversation struct {
+	SrcAddr string `json:"src_addr"`
+	DstAddr string `json:"dst_addr"`
+	DstPort *int   `json:"dst_port"`
+	Bytes   int64  `json:"bytes"`
+	Flows   int64  `json:"flows"`
+}
+
+type internalExternalBucket struct {
+	Bucket string `json:"bucket"`
+	Flows  int64  `json:"flows"`
+	Bytes  int64  `json:"bytes"`
+}
+
 type chartData struct {
-	ActionCounts      []chartPoint  `json:"action_counts"`
-	TopSrcIPs         []chartPoint  `json:"top_src_ips"`
-	TopDstPorts       []chartPoint  `json:"top_dst_ports"`
-	TopRejectedSrcIPs []chartPoint  `json:"top_rejected_src_ips"`
-	TopInterfaces     []chartPoint  `json:"top_interfaces"`
-	BurstWindows      []burstWindow `json:"burst_windows"`
+	TopSrcIPs         []chartPoint             `json:"top_src_ips"`
+	TopDstPorts       []chartPoint             `json:"top_dst_ports"`
+	TopRejectedSrcIPs []chartPoint             `json:"top_rejected_src_ips"`
+	TopInterfaces     []chartPoint             `json:"top_interfaces"`
+	TopTalkersByBytes []chartPoint             `json:"top_talkers_by_bytes"`
+	TopConversations  []conversation           `json:"top_conversations"`
+	InternalExternal  []internalExternalBucket `json:"internal_external_split"`
+	BurstWindows      []burstWindow            `json:"burst_windows"`
 }
 
 type findingRecord struct {
@@ -116,15 +166,22 @@ type processedEvent struct {
 }
 
 type analysisAccumulator struct {
-	totalLines        int
-	parsedLines       int
-	parseErrors       int
-	acceptedCount     int
-	rejectedCount     int
-	srcCounts         map[string]int64
-	dstPortCounts     map[string]int64
-	rejectedSrcCounts map[string]int64
-	interfaceCounts   map[string]int64
+	totalLines             int
+	parsedLines            int
+	parseErrors            int
+	acceptedCount          int
+	rejectedCount          int
+	noDataCount            int
+	skipDataCount          int
+	srcCounts              map[string]int64
+	dstPortCounts          map[string]int64
+	rejectedSrcCounts      map[string]int64
+	interfaceCounts        map[string]int64
+	bytesBySrc             map[string]int64
+	conversations          map[string]*conversation
+	internalExternalFlows  map[string]int64
+	internalExternalBytes  map[string]int64
+	burstBuckets           map[int64]int64
 }
 
 type findingsAggregator struct {
@@ -134,9 +191,6 @@ type findingsAggregator struct {
 	firstSeenByKey  map[string]time.Time
 	lastSeenByKey   map[string]time.Time
 	scanWindows     map[string]*scanWindow
-	skipDataCount   int
-	skipDataFirst   *time.Time
-	skipDataLast    *time.Time
 	timelineEntries []timelineEntry
 }
 
@@ -156,10 +210,15 @@ type countPair struct {
 
 func newAnalysisAccumulator() *analysisAccumulator {
 	return &analysisAccumulator{
-		srcCounts:         make(map[string]int64),
-		dstPortCounts:     make(map[string]int64),
-		rejectedSrcCounts: make(map[string]int64),
-		interfaceCounts:   make(map[string]int64),
+		srcCounts:             make(map[string]int64),
+		dstPortCounts:         make(map[string]int64),
+		rejectedSrcCounts:     make(map[string]int64),
+		interfaceCounts:       make(map[string]int64),
+		bytesBySrc:            make(map[string]int64),
+		conversations:         make(map[string]*conversation),
+		internalExternalFlows: make(map[string]int64),
+		internalExternalBytes: make(map[string]int64),
+		burstBuckets:          make(map[int64]int64),
 	}
 }
 
@@ -317,6 +376,12 @@ func (a *analysisAccumulator) addEvent(parsed *parsedVpcFlowLine) {
 	if parsed.Action == actionReject {
 		a.rejectedCount++
 	}
+	switch parsed.LogStatus {
+	case logStatusNoData:
+		a.noDataCount++
+	case logStatusSkipData:
+		a.skipDataCount++
+	}
 	if parsed.SrcAddr != "" {
 		a.srcCounts[parsed.SrcAddr]++
 	}
@@ -329,26 +394,64 @@ func (a *analysisAccumulator) addEvent(parsed *parsedVpcFlowLine) {
 	if parsed.InterfaceID != "" {
 		a.interfaceCounts[parsed.InterfaceID]++
 	}
+	if parsed.SrcAddr != "" && parsed.Bytes != nil {
+		a.bytesBySrc[parsed.SrcAddr] += *parsed.Bytes
+	}
+	if parsed.SrcAddr != "" && parsed.DstAddr != "" {
+		key := parsed.SrcAddr + "|" + parsed.DstAddr + "|"
+		dstPort := -1
+		if parsed.DstPort != nil {
+			dstPort = *parsed.DstPort
+			key += strconv.Itoa(dstPort)
+		}
+		convo, exists := a.conversations[key]
+		if !exists {
+			convo = &conversation{
+				SrcAddr: parsed.SrcAddr,
+				DstAddr: parsed.DstAddr,
+			}
+			if parsed.DstPort != nil {
+				port := *parsed.DstPort
+				convo.DstPort = &port
+			}
+			a.conversations[key] = convo
+		}
+		convo.Flows++
+		if parsed.Bytes != nil {
+			convo.Bytes += *parsed.Bytes
+		}
+	}
+	if parsed.SrcAddr != "" && parsed.DstAddr != "" {
+		bucket := internalExternalBucketKey(parsed.SrcAddr, parsed.DstAddr)
+		a.internalExternalFlows[bucket]++
+		if parsed.Bytes != nil {
+			a.internalExternalBytes[bucket] += *parsed.Bytes
+		}
+	}
+	if parsed.StartTime != nil {
+		bucketEpoch := parsed.StartTime.UTC().Unix() / burstBucketSeconds * burstBucketSeconds
+		a.burstBuckets[bucketEpoch]++
+	}
+}
+
+func internalExternalBucketKey(srcAddr, dstAddr string) string {
+	srcInternal := isInternalIP(srcAddr)
+	dstInternal := isInternalIP(dstAddr)
+	switch {
+	case srcInternal && dstInternal:
+		return bucketInternalToInternal
+	case srcInternal && !dstInternal:
+		return bucketInternalToExternal
+	case !srcInternal && dstInternal:
+		return bucketExternalToInternal
+	default:
+		return bucketExternalToExternal
+	}
 }
 
 func (f *findingsAggregator) add(parsed *parsedVpcFlowLine) {
 	if parsed.SrcAddr != "" && parsed.Bytes != nil {
 		f.bytesBySrc[parsed.SrcAddr] += *parsed.Bytes
-		f.touch(findingTopTalker+"|"+parsed.SrcAddr, parsed.StartTime)
-	}
-
-	if parsed.LogStatus == logStatusSkipData {
-		f.skipDataCount++
-		if parsed.StartTime != nil {
-			if f.skipDataFirst == nil || parsed.StartTime.Before(*f.skipDataFirst) {
-				first := *parsed.StartTime
-				f.skipDataFirst = &first
-			}
-			if f.skipDataLast == nil || parsed.StartTime.After(*f.skipDataLast) {
-				last := *parsed.StartTime
-				f.skipDataLast = &last
-			}
-		}
 	}
 
 	if parsed.Action == actionReject && parsed.SrcAddr != "" {
@@ -392,11 +495,10 @@ func (f *findingsAggregator) add(parsed *parsedVpcFlowLine) {
 func (f *findingsAggregator) build() []findingRecord {
 	findings := make([]findingRecord, 0)
 
-	for _, entry := range topCountPairsFromIntMap(f.rejectedBySrc, findingLimit) {
-		if entry.count < rejectedTrafficThreshold {
+	for src, count := range f.rejectedBySrc {
+		if count < rejectedTrafficThreshold {
 			continue
 		}
-		src := entry.label
 		firstSeen := f.timeForKey(findingRejectedTraffic + "|" + src)
 		lastSeen := f.lastTimeForKey(findingRejectedTraffic + "|" + src)
 		findings = append(findings, findingRecord{
@@ -406,31 +508,9 @@ func (f *findingsAggregator) build() []findingRecord {
 			Description: src + " generated repeated rejected VPC flows.",
 			FirstSeenAt: firstSeen,
 			LastSeenAt:  lastSeen,
-			Count:       int(entry.count),
+			Count:       count,
 			Metadata: map[string]any{
 				"src_addr": src,
-			},
-		})
-	}
-
-	for _, entry := range topCountPairs(f.bytesBySrc, topTalkerLimit) {
-		if entry.count <= 0 {
-			continue
-		}
-		src := entry.label
-		firstSeen := f.timeForKey(findingTopTalker + "|" + src)
-		lastSeen := f.lastTimeForKey(findingTopTalker + "|" + src)
-		findings = append(findings, findingRecord{
-			Type:        findingTopTalker,
-			Severity:    "low",
-			Title:       "High-volume source traffic",
-			Description: src + " transferred the most bytes in the upload.",
-			FirstSeenAt: firstSeen,
-			LastSeenAt:  lastSeen,
-			Count:       1,
-			Metadata: map[string]any{
-				"src_addr":    src,
-				"total_bytes": entry.count,
 			},
 		})
 	}
@@ -490,31 +570,15 @@ func (f *findingsAggregator) build() []findingRecord {
 		})
 	}
 
-	if f.skipDataCount > 0 {
-		findings = append(findings, findingRecord{
-			Type:        findingVisibilityGap,
-			Severity:    "high",
-			Title:       "Visibility gap in flow-log delivery",
-			Description: "The upload contains SKIPDATA records, which indicates missing published flow-log data.",
-			FirstSeenAt: f.skipDataFirst,
-			LastSeenAt:  f.skipDataLast,
-			Count:       f.skipDataCount,
-			Metadata: map[string]any{
-				"log_status": logStatusSkipData,
-			},
-		})
-	}
-
 	sort.Slice(findings, func(i, j int) bool {
 		if findingSeverityRank(findings[i].Severity) == findingSeverityRank(findings[j].Severity) {
-			return findings[i].Count > findings[j].Count
+			if findings[i].Type == findings[j].Type {
+				return findings[i].Count > findings[j].Count
+			}
+			return findings[i].Type < findings[j].Type
 		}
 		return findingSeverityRank(findings[i].Severity) > findingSeverityRank(findings[j].Severity)
 	})
-
-	if len(findings) > findingLimit {
-		findings = findings[:findingLimit]
-	}
 
 	f.timelineEntries = buildTimelineEntries(findings)
 	return findings
@@ -556,38 +620,132 @@ func (f *findingsAggregator) lastTimeForKey(key string) *time.Time {
 }
 
 func buildTimelineEntries(findings []findingRecord) []timelineEntry {
-	entries := make([]timelineEntry, 0, len(findings))
+	type accum struct {
+		severity      string
+		title         string
+		first         *time.Time
+		last          *time.Time
+		instanceCount int
+		totalCount    int
+	}
+	byType := make(map[string]*accum)
+	order := make([]string, 0)
+
 	for _, finding := range findings {
-		timestamp := ""
+		entry, exists := byType[finding.Type]
+		if !exists {
+			entry = &accum{severity: finding.Severity, title: finding.Title}
+			byType[finding.Type] = entry
+			order = append(order, finding.Type)
+		}
+		entry.instanceCount++
+		entry.totalCount += finding.Count
 		if finding.FirstSeenAt != nil {
-			timestamp = finding.FirstSeenAt.UTC().Format(time.RFC3339)
-		}
-		entry := timelineEntry{
-			Timestamp:   timestamp,
-			Type:        finding.Type,
-			Severity:    finding.Severity,
-			Title:       finding.Title,
-			Description: finding.Description,
-			Count:       finding.Count,
-		}
-		if finding.Metadata != nil {
-			if srcAddr, ok := finding.Metadata["src_addr"].(string); ok {
-				entry.SrcAddr = srcAddr
-			}
-			if dstPort, ok := finding.Metadata["dst_port"].(int); ok {
-				entry.DstPort = &dstPort
+			if entry.first == nil || finding.FirstSeenAt.Before(*entry.first) {
+				value := *finding.FirstSeenAt
+				entry.first = &value
 			}
 		}
-		entries = append(entries, entry)
+		if finding.LastSeenAt != nil {
+			if entry.last == nil || finding.LastSeenAt.After(*entry.last) {
+				value := *finding.LastSeenAt
+				entry.last = &value
+			}
+		}
+	}
+
+	entries := make([]timelineEntry, 0, len(order))
+	for _, typeKey := range order {
+		entry := byType[typeKey]
+		first := ""
+		last := ""
+		if entry.first != nil {
+			first = entry.first.UTC().Format(time.RFC3339)
+		}
+		if entry.last != nil {
+			last = entry.last.UTC().Format(time.RFC3339)
+		}
+		entries = append(entries, timelineEntry{
+			Type:          typeKey,
+			Severity:      entry.severity,
+			Title:         entry.title,
+			FirstSeenAt:   first,
+			LastSeenAt:    last,
+			InstanceCount: entry.instanceCount,
+			TotalCount:    entry.totalCount,
+		})
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Timestamp < entries[j].Timestamp
+		if findingSeverityRank(entries[i].Severity) == findingSeverityRank(entries[j].Severity) {
+			return entries[i].FirstSeenAt < entries[j].FirstSeenAt
+		}
+		return findingSeverityRank(entries[i].Severity) > findingSeverityRank(entries[j].Severity)
 	})
-	if len(entries) > timelineLimit {
-		return entries[:timelineLimit]
-	}
+
 	return entries
+}
+
+func buildCharts(acc *analysisAccumulator) chartData {
+	conversations := make([]conversation, 0, len(acc.conversations))
+	for _, convo := range acc.conversations {
+		conversations = append(conversations, *convo)
+	}
+	sort.Slice(conversations, func(i, j int) bool {
+		if conversations[i].Bytes == conversations[j].Bytes {
+			if conversations[i].SrcAddr == conversations[j].SrcAddr {
+				return conversations[i].DstAddr < conversations[j].DstAddr
+			}
+			return conversations[i].SrcAddr < conversations[j].SrcAddr
+		}
+		return conversations[i].Bytes > conversations[j].Bytes
+	})
+	if len(conversations) > topNLimit {
+		conversations = conversations[:topNLimit]
+	}
+
+	bucketOrder := []string{
+		bucketInternalToInternal,
+		bucketInternalToExternal,
+		bucketExternalToInternal,
+		bucketExternalToExternal,
+	}
+	internalExternal := make([]internalExternalBucket, 0, len(bucketOrder))
+	for _, key := range bucketOrder {
+		internalExternal = append(internalExternal, internalExternalBucket{
+			Bucket: key,
+			Flows:  acc.internalExternalFlows[key],
+			Bytes:  acc.internalExternalBytes[key],
+		})
+	}
+
+	burstWindows := make([]burstWindow, 0, len(acc.burstBuckets))
+	for epoch, count := range acc.burstBuckets {
+		burstWindows = append(burstWindows, burstWindow{
+			Bucket: time.Unix(epoch, 0).UTC().Format(time.RFC3339),
+			Count:  count,
+		})
+	}
+	sort.Slice(burstWindows, func(i, j int) bool {
+		if burstWindows[i].Count == burstWindows[j].Count {
+			return burstWindows[i].Bucket < burstWindows[j].Bucket
+		}
+		return burstWindows[i].Count > burstWindows[j].Count
+	})
+	if len(burstWindows) > topNLimit {
+		burstWindows = burstWindows[:topNLimit]
+	}
+
+	return chartData{
+		TopSrcIPs:         toChartPoints(topCountPairs(acc.srcCounts, topNLimit)),
+		TopDstPorts:       toChartPoints(topCountPairs(acc.dstPortCounts, topNLimit)),
+		TopRejectedSrcIPs: toChartPoints(topCountPairs(acc.rejectedSrcCounts, topNLimit)),
+		TopInterfaces:     toChartPoints(topCountPairs(acc.interfaceCounts, topNLimit)),
+		TopTalkersByBytes: toChartPoints(topCountPairs(acc.bytesBySrc, topNLimit)),
+		TopConversations:  conversations,
+		InternalExternal:  internalExternal,
+		BurstWindows:      burstWindows,
+	}
 }
 
 func buildAISummary(acc *analysisAccumulator, findings []findingRecord) string {

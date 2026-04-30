@@ -202,9 +202,8 @@ func (app *application) processUpload(ctx context.Context, upload *claimedUpload
 		timelineEntries = []timelineEntry{}
 	}
 
-	topSrcJSON := toJSON(toChartPoints(topCountPairs(acc.srcCounts, 10)))
-	topDstPortsJSON := toJSON(toChartPoints(topCountPairs(acc.dstPortCounts, 10)))
-	topRejectedSrcJSON := toJSON(toChartPoints(topCountPairs(acc.rejectedSrcCounts, 10)))
+	charts := buildCharts(acc)
+	chartsJSON := toJSON(charts)
 	timelineJSON := toJSON(timelineEntries)
 	aiSummary := buildAISummary(acc, findings)
 
@@ -231,9 +230,10 @@ func (app *application) processUpload(ctx context.Context, upload *claimedUpload
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO summaries (
 			upload_id, total_records, accepted_count, rejected_count, parse_errors,
-			top_src_ips_json, top_dst_ports_json, top_rejected_src_ips_json, timeline_json, ai_summary, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10, NOW())
-	`, upload.ID, acc.parsedLines, acc.acceptedCount, acc.rejectedCount, acc.parseErrors, topSrcJSON, topDstPortsJSON, topRejectedSrcJSON, timelineJSON, aiSummary); err != nil {
+			nodata_count, skipdata_count,
+			charts_json, timeline_json, ai_summary, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, NOW())
+	`, upload.ID, acc.parsedLines, acc.acceptedCount, acc.rejectedCount, acc.parseErrors, acc.noDataCount, acc.skipDataCount, chartsJSON, timelineJSON, aiSummary); err != nil {
 		return err
 	}
 

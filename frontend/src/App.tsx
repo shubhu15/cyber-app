@@ -25,10 +25,7 @@ type UploadStatus = {
   progress_percentage: number;
 };
 
-type Finding = {
-  type: string;
-  severity: string;
-  title: string;
+type FindingInstance = {
   description: string;
   first_seen_at?: string;
   last_seen_at?: string;
@@ -36,15 +33,28 @@ type Finding = {
   metadata: Record<string, unknown>;
 };
 
-type TimelineEntry = {
-  timestamp: string;
+type FindingGroup = {
   type: string;
   severity: string;
   title: string;
-  description: string;
-  src_addr?: string;
-  dst_port?: number;
-  count?: number;
+  instance_count: number;
+  total_count: number;
+  instances: FindingInstance[];
+};
+
+type SeverityBucket = {
+  severity: string;
+  groups: FindingGroup[];
+};
+
+type TimelineEntry = {
+  type: string;
+  severity: string;
+  title: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  instance_count: number;
+  total_count: number;
 };
 
 type ChartPoint = {
@@ -57,56 +67,57 @@ type BurstWindow = {
   count: number;
 };
 
+type Conversation = {
+  src_addr: string;
+  dst_addr: string;
+  dst_port: number | null;
+  bytes: number;
+  flows: number;
+};
+
+type InternalExternalBucket = {
+  bucket: string;
+  flows: number;
+  bytes: number;
+};
+
 type ChartData = {
-  action_counts: ChartPoint[];
   top_src_ips: ChartPoint[];
   top_dst_ports: ChartPoint[];
   top_rejected_src_ips: ChartPoint[];
   top_interfaces: ChartPoint[];
+  top_talkers_by_bytes: ChartPoint[];
+  top_conversations: Conversation[];
+  internal_external_split: InternalExternalBucket[];
   burst_windows: BurstWindow[];
-};
-
-type EventRecord = {
-  id: number;
-  version: number;
-  account_id?: string;
-  interface_id?: string;
-  src_addr?: string;
-  dst_addr?: string;
-  src_port?: number;
-  dst_port?: number;
-  protocol?: number;
-  protocol_label: string;
-  packets?: number;
-  bytes?: number;
-  start_time?: string;
-  end_time?: string;
-  action?: string;
-  log_status: string;
-  raw_line: string;
 };
 
 type UploadResults = {
   upload: UploadStatus;
   summary: {
+    total_lines: number;
     total_records: number;
+    parsed_percent: number;
     accepted_count: number;
     rejected_count: number;
+    nodata_count: number;
+    skipdata_count: number;
     parse_errors: number;
     ai_summary: string;
   };
-  findings: Finding[];
+  findings: SeverityBucket[];
   timeline: TimelineEntry[];
   charts: ChartData;
-  events: EventRecord[];
 };
 
 const EMPTY_CHARTS: ChartData = {
-  action_counts: [],
   top_src_ips: [],
   top_dst_ports: [],
   top_rejected_src_ips: [],
   top_interfaces: [],
+  top_talkers_by_bytes: [],
+  top_conversations: [],
+  internal_external_split: [],
   burst_windows: []
 };
 
@@ -168,8 +179,13 @@ function navigateTo(path: string) {
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
-function ChartBars(props: { title: string; items: ChartPoint[] }) {
+function ChartBars(props: {
+  title: string;
+  items: ChartPoint[];
+  valueFormatter?: (value: number) => string;
+}) {
   const max = props.items.reduce((highest, item) => Math.max(highest, item.count), 1);
+  const formatValue = props.valueFormatter ?? ((value: number) => value.toLocaleString());
   return (
     <section className="panel">
       <div className="panel-header">
@@ -181,7 +197,7 @@ function ChartBars(props: { title: string; items: ChartPoint[] }) {
           <div className="bar-row" key={`${props.title}-${item.label}`}>
             <div className="bar-label">
               <span>{item.label}</span>
-              <strong>{item.count}</strong>
+              <strong>{formatValue(item.count)}</strong>
             </div>
             <div className="bar-track">
               <div className="bar-fill" style={{ width: `${Math.max((item.count / max) * 100, 6)}%` }} />
@@ -193,30 +209,238 @@ function ChartBars(props: { title: string; items: ChartPoint[] }) {
   );
 }
 
+const INTERNAL_EXTERNAL_LABELS: Record<string, string> = {
+  internal_to_internal: "Internal → Internal",
+  internal_to_external: "Internal → External",
+  external_to_internal: "External → Internal",
+  external_to_external: "External → External"
+};
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let scaled = value;
+  let unit = 0;
+  while (scaled >= 1024 && unit < units.length - 1) {
+    scaled /= 1024;
+    unit++;
+  }
+  const precision = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+  return `${scaled.toFixed(precision)} ${units[unit]}`;
+}
+
+function InternalExternalChart(props: { buckets: InternalExternalBucket[] }) {
+  const total = props.buckets.reduce((sum, bucket) => sum + bucket.flows, 0);
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <h3>Internal vs external traffic</h3>
+      </div>
+      <div className="ie-list">
+        {props.buckets.length === 0 || total === 0 ? (
+          <p className="muted">No traffic to classify.</p>
+        ) : null}
+        {props.buckets.map((bucket) => {
+          const label = INTERNAL_EXTERNAL_LABELS[bucket.bucket] ?? bucket.bucket;
+          const pct = total > 0 ? Math.round((bucket.flows / total) * 100) : 0;
+          return (
+            <div className="ie-row" key={bucket.bucket}>
+              <div className="ie-meta">
+                <strong>{label}</strong>
+                <span className="muted">
+                  {bucket.flows.toLocaleString()} flows · {formatBytes(bucket.bytes)} · {pct}%
+                </span>
+              </div>
+              <div className="bar-track">
+                <div className="bar-fill" style={{ width: `${Math.max(pct, 2)}%` }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function ConversationsChart(props: { conversations: Conversation[] }) {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <h3>Top conversations (by bytes)</h3>
+      </div>
+      <div className="convo-list">
+        {props.conversations.length === 0 ? <p className="muted">No conversations yet.</p> : null}
+        {props.conversations.map((convo, idx) => {
+          const port = convo.dst_port == null ? "" : `:${convo.dst_port}`;
+          return (
+            <div className="convo-row" key={`${convo.src_addr}->${convo.dst_addr}${port}-${idx}`}>
+              <div className="convo-pair">
+                <span>{convo.src_addr}</span>
+                <span className="convo-arrow">→</span>
+                <span>
+                  {convo.dst_addr}
+                  {port}
+                </span>
+              </div>
+              <div className="convo-meta">
+                <strong>{formatBytes(convo.bytes)}</strong>
+                <span className="muted">{convo.flows.toLocaleString()} flows</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function FindingsView(props: { buckets: SeverityBucket[] }) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  if (props.buckets.length === 0) {
+    return <p className="muted">No notable findings were generated.</p>;
+  }
+
+  return (
+    <div className="findings-view">
+      {props.buckets.map((bucket) => (
+        <section className={`severity-section severity-${bucket.severity}`} key={bucket.severity}>
+          <header className="severity-header">
+            <span className="chip">{bucket.severity}</span>
+            <span className="muted">
+              {bucket.groups.length} {bucket.groups.length === 1 ? "type" : "types"}
+            </span>
+          </header>
+          <div className="finding-group-list">
+            {bucket.groups.map((group) => {
+              const key = `${bucket.severity}-${group.type}`;
+              const isOpen = expanded[key] ?? false;
+              const shown = group.instances.length;
+              return (
+                <article className="finding-group" key={key}>
+                  <button
+                    type="button"
+                    className="finding-group-header"
+                    onClick={() => setExpanded((prev) => ({ ...prev, [key]: !isOpen }))}
+                  >
+                    <div className="finding-group-meta">
+                      <strong>{group.title}</strong>
+                      <span className="muted">
+                        {group.instance_count} {group.instance_count === 1 ? "instance" : "instances"} · total count {group.total_count}
+                      </span>
+                    </div>
+                    <span className="caret">{isOpen ? "−" : "+"}</span>
+                  </button>
+                  {isOpen ? (
+                    <div className="finding-instance-list">
+                      {group.instances.map((instance, idx) => (
+                        <div className="finding-instance" key={`${key}-${idx}`}>
+                          <p>{instance.description}</p>
+                          <div className="finding-instance-meta">
+                            <span>count {instance.count}</span>
+                            {instance.first_seen_at ? (
+                              <span>first {new Date(instance.first_seen_at).toLocaleString()}</span>
+                            ) : null}
+                            {instance.last_seen_at ? (
+                              <span>last {new Date(instance.last_seen_at).toLocaleString()}</span>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                      {group.instance_count > shown ? (
+                        <p className="muted">
+                          Showing top {shown} of {group.instance_count} instances.
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function TimelineGantt(props: { entries: TimelineEntry[] }) {
+  if (props.entries.length === 0) {
+    return <p className="muted">No notable timeline entries were generated.</p>;
+  }
+
+  const stamps = props.entries.flatMap((entry) => {
+    const list: number[] = [];
+    const first = Date.parse(entry.first_seen_at);
+    const last = Date.parse(entry.last_seen_at);
+    if (!Number.isNaN(first)) list.push(first);
+    if (!Number.isNaN(last)) list.push(last);
+    return list;
+  });
+
+  if (stamps.length === 0) {
+    return <p className="muted">Timeline entries are missing timestamps.</p>;
+  }
+
+  const minTime = Math.min(...stamps);
+  const maxTime = Math.max(...stamps);
+  const span = Math.max(maxTime - minTime, 1);
+
+  return (
+    <div className="timeline-gantt">
+      <div className="timeline-axis">
+        <span>{new Date(minTime).toLocaleString()}</span>
+        <span>{new Date(maxTime).toLocaleString()}</span>
+      </div>
+      <div className="timeline-rows">
+        {props.entries.map((entry) => {
+          const first = Date.parse(entry.first_seen_at);
+          const last = Date.parse(entry.last_seen_at);
+          const safeFirst = Number.isNaN(first) ? minTime : first;
+          const safeLast = Number.isNaN(last) ? safeFirst : last;
+          const left = ((safeFirst - minTime) / span) * 100;
+          const width = Math.max(((safeLast - safeFirst) / span) * 100, 1);
+          return (
+            <div className="timeline-row" key={entry.type}>
+              <div className="timeline-label">
+                <strong>{entry.title}</strong>
+                <span className="muted">
+                  {entry.instance_count} {entry.instance_count === 1 ? "instance" : "instances"} · total {entry.total_count}
+                </span>
+              </div>
+              <div className="timeline-track">
+                <div
+                  className={`timeline-bar severity-${entry.severity}`}
+                  style={{ left: `${left}%`, width: `${width}%` }}
+                  title={`${entry.first_seen_at} → ${entry.last_seen_at}`}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function normalizeResults(results: UploadResults): UploadResults {
   return {
     ...results,
     findings: results.findings ?? [],
     timeline: results.timeline ?? [],
     charts: {
-      action_counts: results.charts?.action_counts ?? [],
       top_src_ips: results.charts?.top_src_ips ?? [],
       top_dst_ports: results.charts?.top_dst_ports ?? [],
       top_rejected_src_ips: results.charts?.top_rejected_src_ips ?? [],
       top_interfaces: results.charts?.top_interfaces ?? [],
+      top_talkers_by_bytes: results.charts?.top_talkers_by_bytes ?? [],
+      top_conversations: results.charts?.top_conversations ?? [],
+      internal_external_split: results.charts?.internal_external_split ?? [],
       burst_windows: results.charts?.burst_windows ?? []
-    },
-    events: results.events ?? []
+    }
   };
 }
 
-function formatOptionalDate(value?: string) {
-  return value ? new Date(value).toLocaleString() : "-";
-}
-
-function formatOptionalNumber(value?: number) {
-  return value === undefined ? "-" : String(value);
-}
 
 export default function App() {
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.pathname));
@@ -362,11 +586,17 @@ export default function App() {
     if (!uploadResults) {
       return [];
     }
+    const summary = uploadResults.summary;
     return [
-      { label: "Total records", value: uploadResults.summary.total_records },
-      { label: "Accepted", value: uploadResults.summary.accepted_count },
-      { label: "Rejected", value: uploadResults.summary.rejected_count },
-      { label: "Parse errors", value: uploadResults.summary.parse_errors }
+      {
+        label: "Parsed",
+        value: `${summary.total_records.toLocaleString()} / ${summary.total_lines.toLocaleString()} (${summary.parsed_percent}%)`
+      },
+      { label: "Accepted", value: summary.accepted_count.toLocaleString() },
+      { label: "Rejected", value: summary.rejected_count.toLocaleString() },
+      { label: "NODATA", value: summary.nodata_count.toLocaleString() },
+      { label: "SKIPDATA", value: summary.skipdata_count.toLocaleString() },
+      { label: "Parse errors", value: summary.parse_errors.toLocaleString() }
     ];
   }, [uploadResults]);
 
@@ -714,49 +944,27 @@ export default function App() {
         <section className="results-layout">
           <section className="panel">
             <div className="panel-header">
-              <h2>Top findings</h2>
+              <h2>Findings</h2>
             </div>
-            <div className="finding-list">
-              {uploadResults.findings.length ? null : <p className="muted">No notable findings were generated.</p>}
-              {uploadResults.findings.map((finding) => (
-                <article className={`finding-card severity-${finding.severity}`} key={`${finding.type}-${finding.title}`}>
-                  <div className="finding-topline">
-                    <span className="chip">{finding.severity}</span>
-                    <strong>{finding.count}</strong>
-                  </div>
-                  <h3>{finding.title}</h3>
-                  <p>{finding.description}</p>
-                </article>
-              ))}
-            </div>
+            <FindingsView buckets={uploadResults.findings} />
           </section>
 
           <section className="panel">
             <div className="panel-header">
               <h2>Timeline</h2>
             </div>
-            <div className="timeline-list">
-              {uploadResults.timeline.length ? null : <p className="muted">No notable timeline entries were generated.</p>}
-              {uploadResults.timeline.map((item, index) => (
-                <article className="timeline-item" key={`${item.timestamp}-${item.type}-${index}`}>
-                  <div className="timeline-meta">
-                    <span>{item.timestamp ? new Date(item.timestamp).toLocaleString() : "No timestamp"}</span>
-                    <span>{item.type}</span>
-                  </div>
-                  <strong>{item.title}</strong>
-                  <p>{item.description}</p>
-                </article>
-              ))}
-            </div>
+            <TimelineGantt entries={uploadResults.timeline} />
           </section>
         </section>
 
         <section className="chart-grid">
-          <ChartBars title="Accept vs reject" items={charts.action_counts} />
+          <InternalExternalChart buckets={charts.internal_external_split} />
           <ChartBars title="Top source IPs" items={charts.top_src_ips} />
           <ChartBars title="Top destination ports" items={charts.top_dst_ports} />
           <ChartBars title="Top rejected sources" items={charts.top_rejected_src_ips} />
           <ChartBars title="Top interfaces" items={charts.top_interfaces} />
+          <ChartBars title="Top talkers (bytes)" items={charts.top_talkers_by_bytes} valueFormatter={formatBytes} />
+          <ConversationsChart conversations={charts.top_conversations} />
           <section className="panel">
             <div className="panel-header">
               <h3>Burst windows</h3>
@@ -776,51 +984,6 @@ export default function App() {
               ))}
             </div>
           </section>
-        </section>
-
-        <section className="panel">
-          <div className="panel-header">
-            <h2>Parsed flow records</h2>
-            <span className="chip">{uploadResults.events.length} rows</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Start</th>
-                  <th>End</th>
-                  <th>Source</th>
-                  <th>Src port</th>
-                  <th>Destination</th>
-                  <th>Dst port</th>
-                  <th>Protocol</th>
-                  <th>Action</th>
-                  <th>Packets</th>
-                  <th>Bytes</th>
-                  <th>Interface</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {uploadResults.events.map((event) => (
-                  <tr key={event.id}>
-                    <td>{formatOptionalDate(event.start_time)}</td>
-                    <td>{formatOptionalDate(event.end_time)}</td>
-                    <td>{event.src_addr || "-"}</td>
-                    <td>{formatOptionalNumber(event.src_port)}</td>
-                    <td>{event.dst_addr || "-"}</td>
-                    <td>{formatOptionalNumber(event.dst_port)}</td>
-                    <td>{event.protocol_label}</td>
-                    <td>{event.action || "-"}</td>
-                    <td>{formatOptionalNumber(event.packets)}</td>
-                    <td>{formatOptionalNumber(event.bytes)}</td>
-                    <td>{event.interface_id || "-"}</td>
-                    <td>{event.log_status}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         </section>
       </section>
     );
