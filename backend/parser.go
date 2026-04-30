@@ -52,6 +52,8 @@ const (
 	findingRejectedTraffic   = "REJECTED_TRAFFIC"
 	findingHighPortScan      = "HIGH_PORT_SCAN"
 	findingSensitivePort     = "SENSITIVE_PORT_TRAFFIC"
+	findingSSHBruteForce     = "SSH_BRUTE_FORCE"
+	findingSuspiciousProbe   = "SUSPICIOUS_PORT_PROBE"
 	actionAccept             = "ACCEPT"
 	actionReject             = "REJECT"
 	logStatusOK              = "OK"
@@ -59,6 +61,8 @@ const (
 	logStatusSkipData        = "SKIPDATA"
 	rejectedTrafficThreshold = 3
 	sensitivePortThreshold   = 3
+	sshBruteForceThreshold   = 10
+	suspiciousProbeThreshold = 5
 	portScanPortThreshold    = 10
 	portScanFlowThreshold    = 10
 	topNLimit                = 5
@@ -71,6 +75,30 @@ var sensitivePorts = map[int]struct{}{
 	1433: {},
 	3306: {},
 	5432: {},
+}
+
+var suspiciousProbePorts = map[int]struct{}{
+	21:   {},
+	22:   {},
+	23:   {},
+	445:  {},
+	1433: {},
+	3389: {},
+	5900: {},
+	6379: {},
+}
+
+var portServiceNames = map[int]string{
+	21:   "FTP",
+	22:   "SSH",
+	23:   "Telnet",
+	445:  "SMB",
+	1433: "MSSQL",
+	3306: "MySQL",
+	3389: "RDP",
+	5432: "PostgreSQL",
+	5900: "VNC",
+	6379: "Redis",
 }
 
 type parsedVpcFlowLine struct {
@@ -166,32 +194,34 @@ type processedEvent struct {
 }
 
 type analysisAccumulator struct {
-	totalLines             int
-	parsedLines            int
-	parseErrors            int
-	acceptedCount          int
-	rejectedCount          int
-	noDataCount            int
-	skipDataCount          int
-	srcCounts              map[string]int64
-	dstPortCounts          map[string]int64
-	rejectedSrcCounts      map[string]int64
-	interfaceCounts        map[string]int64
-	bytesBySrc             map[string]int64
-	conversations          map[string]*conversation
-	internalExternalFlows  map[string]int64
-	internalExternalBytes  map[string]int64
-	burstBuckets           map[int64]int64
+	totalLines            int
+	parsedLines           int
+	parseErrors           int
+	acceptedCount         int
+	rejectedCount         int
+	noDataCount           int
+	skipDataCount         int
+	srcCounts             map[string]int64
+	dstPortCounts         map[string]int64
+	rejectedSrcCounts     map[string]int64
+	interfaceCounts       map[string]int64
+	bytesBySrc            map[string]int64
+	conversations         map[string]*conversation
+	internalExternalFlows map[string]int64
+	internalExternalBytes map[string]int64
+	burstBuckets          map[int64]int64
 }
 
 type findingsAggregator struct {
-	rejectedBySrc   map[string]int
-	bytesBySrc      map[string]int64
-	sensitiveByKey  map[string]int
-	firstSeenByKey  map[string]time.Time
-	lastSeenByKey   map[string]time.Time
-	scanWindows     map[string]*scanWindow
-	timelineEntries []timelineEntry
+	rejectedBySrc        map[string]int
+	bytesBySrc           map[string]int64
+	sensitiveByKey       map[string]int
+	sshBySrc             map[string]*sshAttemptStats
+	suspiciousProbeByKey map[string]*probeStats
+	firstSeenByKey       map[string]time.Time
+	lastSeenByKey        map[string]time.Time
+	scanWindows          map[string]*scanWindow
+	timelineEntries      []timelineEntry
 }
 
 type scanWindow struct {
@@ -201,6 +231,17 @@ type scanWindow struct {
 	FlowCount int
 	FirstSeen time.Time
 	LastSeen  time.Time
+}
+
+type sshAttemptStats struct {
+	Count         int
+	RejectedCount int
+	Targets       map[string]struct{}
+}
+
+type probeStats struct {
+	Count   int
+	Targets map[string]struct{}
 }
 
 type countPair struct {
@@ -224,12 +265,14 @@ func newAnalysisAccumulator() *analysisAccumulator {
 
 func newFindingsAggregator() *findingsAggregator {
 	return &findingsAggregator{
-		rejectedBySrc:  make(map[string]int),
-		bytesBySrc:     make(map[string]int64),
-		sensitiveByKey: make(map[string]int),
-		firstSeenByKey: make(map[string]time.Time),
-		lastSeenByKey:  make(map[string]time.Time),
-		scanWindows:    make(map[string]*scanWindow),
+		rejectedBySrc:        make(map[string]int),
+		bytesBySrc:           make(map[string]int64),
+		sensitiveByKey:       make(map[string]int),
+		sshBySrc:             make(map[string]*sshAttemptStats),
+		suspiciousProbeByKey: make(map[string]*probeStats),
+		firstSeenByKey:       make(map[string]time.Time),
+		lastSeenByKey:        make(map[string]time.Time),
+		scanWindows:          make(map[string]*scanWindow),
 	}
 }
 
@@ -449,6 +492,14 @@ func internalExternalBucketKey(srcAddr, dstAddr string) string {
 	}
 }
 
+func isExternalIP(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	ip := net.ParseIP(strings.TrimSpace(value))
+	return ip != nil && !isInternalIP(value)
+}
+
 func (f *findingsAggregator) add(parsed *parsedVpcFlowLine) {
 	if parsed.SrcAddr != "" && parsed.Bytes != nil {
 		f.bytesBySrc[parsed.SrcAddr] += *parsed.Bytes
@@ -488,6 +539,36 @@ func (f *findingsAggregator) add(parsed *parsedVpcFlowLine) {
 			key := parsed.SrcAddr + "|" + strconv.Itoa(*parsed.DstPort)
 			f.sensitiveByKey[key]++
 			f.touch(findingSensitivePort+"|"+key, parsed.StartTime)
+		}
+	}
+
+	if parsed.SrcAddr != "" && parsed.DstAddr != "" && parsed.DstPort != nil && *parsed.DstPort == 22 && isExternalIP(parsed.SrcAddr) {
+		stats := f.sshBySrc[parsed.SrcAddr]
+		if stats == nil {
+			stats = &sshAttemptStats{Targets: make(map[string]struct{})}
+			f.sshBySrc[parsed.SrcAddr] = stats
+		}
+		stats.Count++
+		if parsed.Action == actionReject {
+			stats.RejectedCount++
+		}
+		stats.Targets[parsed.DstAddr] = struct{}{}
+		f.touch(findingSSHBruteForce+"|"+parsed.SrcAddr, parsed.StartTime)
+	}
+
+	if parsed.Action == actionReject && parsed.SrcAddr != "" && parsed.DstPort != nil {
+		if _, ok := suspiciousProbePorts[*parsed.DstPort]; ok {
+			key := parsed.SrcAddr + "|" + strconv.Itoa(*parsed.DstPort)
+			stats := f.suspiciousProbeByKey[key]
+			if stats == nil {
+				stats = &probeStats{Targets: make(map[string]struct{})}
+				f.suspiciousProbeByKey[key] = stats
+			}
+			stats.Count++
+			if parsed.DstAddr != "" {
+				stats.Targets[parsed.DstAddr] = struct{}{}
+			}
+			f.touch(findingSuspiciousProbe+"|"+key, parsed.StartTime)
 		}
 	}
 }
@@ -541,6 +622,30 @@ func (f *findingsAggregator) build() []findingRecord {
 		})
 	}
 
+	for src, stats := range f.sshBySrc {
+		if stats.Count < sshBruteForceThreshold {
+			continue
+		}
+		firstSeen := f.timeForKey(findingSSHBruteForce + "|" + src)
+		lastSeen := f.lastTimeForKey(findingSSHBruteForce + "|" + src)
+		findings = append(findings, findingRecord{
+			Type:        findingSSHBruteForce,
+			Severity:    "high",
+			Title:       "SSH brute-force candidate",
+			Description: src + " generated repeated SSH attempts against internal targets.",
+			FirstSeenAt: firstSeen,
+			LastSeenAt:  lastSeen,
+			Count:       stats.Count,
+			Metadata: map[string]any{
+				"src_addr":       src,
+				"dst_port":       22,
+				"service":        serviceNameForPort(22),
+				"target_count":   len(stats.Targets),
+				"rejected_count": stats.RejectedCount,
+			},
+		})
+	}
+
 	for key, count := range f.sensitiveByKey {
 		if count < sensitivePortThreshold {
 			continue
@@ -566,6 +671,39 @@ func (f *findingsAggregator) build() []findingRecord {
 			Metadata: map[string]any{
 				"src_addr": parts[0],
 				"dst_port": port,
+				"service":  serviceNameForPort(port),
+			},
+		})
+	}
+
+	for key, stats := range f.suspiciousProbeByKey {
+		if stats.Count < suspiciousProbeThreshold {
+			continue
+		}
+		parts := strings.Split(key, "|")
+		if len(parts) != 2 {
+			continue
+		}
+		port, err := strconv.Atoi(parts[1])
+		if err != nil {
+			continue
+		}
+		firstSeen := f.timeForKey(findingSuspiciousProbe + "|" + key)
+		lastSeen := f.lastTimeForKey(findingSuspiciousProbe + "|" + key)
+		findings = append(findings, findingRecord{
+			Type:        findingSuspiciousProbe,
+			Severity:    "medium",
+			Title:       "Repeated suspicious port probes",
+			Description: parts[0] + " generated repeated rejected probes to " + serviceNameForPort(port) + " port " + parts[1] + ".",
+			FirstSeenAt: firstSeen,
+			LastSeenAt:  lastSeen,
+			Count:       stats.Count,
+			Metadata: map[string]any{
+				"src_addr":       parts[0],
+				"dst_port":       port,
+				"service":        serviceNameForPort(port),
+				"target_count":   len(stats.Targets),
+				"rejected_count": stats.Count,
 			},
 		})
 	}
@@ -833,6 +971,13 @@ func joinCountPairs(pairs []countPair) string {
 		parts = append(parts, pair.label+" ("+strconv.FormatInt(pair.count, 10)+")")
 	}
 	return strings.Join(parts, ", ")
+}
+
+func serviceNameForPort(port int) string {
+	if service, ok := portServiceNames[port]; ok {
+		return service
+	}
+	return "unknown"
 }
 
 func findingSeverityRank(value string) int {

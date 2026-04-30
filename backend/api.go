@@ -47,6 +47,11 @@ type messageResponse struct {
 	Message string `json:"message"`
 }
 
+type meResponse struct {
+	ID    int64  `json:"id"`
+	Email string `json:"email"`
+}
+
 type uploadCreatedResponse struct {
 	UploadID int64  `json:"upload_id"`
 	Status   string `json:"status"`
@@ -84,15 +89,15 @@ type resultsResponse struct {
 }
 
 type summaryPayload struct {
-	TotalLines     int    `json:"total_lines"`
-	TotalRecords   int    `json:"total_records"`
-	ParsedPercent  int    `json:"parsed_percent"`
-	AcceptedCount  int    `json:"accepted_count"`
-	RejectedCount  int    `json:"rejected_count"`
-	NoDataCount    int    `json:"nodata_count"`
-	SkipDataCount  int    `json:"skipdata_count"`
-	ParseErrors    int    `json:"parse_errors"`
-	AISummary      string `json:"ai_summary"`
+	TotalLines    int    `json:"total_lines"`
+	TotalRecords  int    `json:"total_records"`
+	ParsedPercent int    `json:"parsed_percent"`
+	AcceptedCount int    `json:"accepted_count"`
+	RejectedCount int    `json:"rejected_count"`
+	NoDataCount   int    `json:"nodata_count"`
+	SkipDataCount int    `json:"skipdata_count"`
+	ParseErrors   int    `json:"parse_errors"`
+	AISummary     string `json:"ai_summary"`
 }
 
 type findingInstance struct {
@@ -123,6 +128,8 @@ func (app *application) routes() http.Handler {
 	mux.HandleFunc("/register", app.handleRegister)
 	mux.HandleFunc("/login", app.handleLogin)
 	mux.HandleFunc("/logout", app.handleLogout)
+	mux.HandleFunc("/me", app.requireSession(app.handleMe))
+	mux.HandleFunc("/session/refresh", app.requireSession(app.handleSessionRefresh))
 	mux.HandleFunc("/uploads", app.requireSession(app.routeUploadsRoot))
 	mux.HandleFunc("/uploads/", app.requireSession(app.routeUploadByID))
 	return app.withCORS(mux)
@@ -270,6 +277,52 @@ func (app *application) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (app *application) handleMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, messageResponse{Message: "Method not allowed."})
+		return
+	}
+	user := sessionUserFromContext(r.Context())
+	writeJSON(w, http.StatusOK, meResponse{ID: user.ID, Email: user.Email})
+}
+
+func (app *application) handleSessionRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, messageResponse{Message: "Method not allowed."})
+		return
+	}
+	cookie, err := r.Cookie(app.config.SessionCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		writeJSON(w, http.StatusUnauthorized, messageResponse{Message: "No session cookie."})
+		return
+	}
+	hash := hashSessionToken(cookie.Value)
+	newExpiry := time.Now().Add(app.config.SessionTTL)
+	result, err := app.db.ExecContext(r.Context(), `
+		UPDATE sessions SET expires_at = $2 WHERE token_hash = $1 AND expires_at > NOW()
+	`, hash, newExpiry)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, messageResponse{Message: "Unable to refresh session."})
+		return
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		writeJSON(w, http.StatusUnauthorized, messageResponse{Message: "Session expired or not found."})
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     app.config.SessionCookieName,
+		Value:    cookie.Value,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   app.config.AppEnv == "production",
+		Expires:  newExpiry,
+		MaxAge:   int(app.config.SessionTTL.Seconds()),
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (app *application) routeUploadsRoot(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -285,6 +338,21 @@ func (app *application) routeUploadByID(w http.ResponseWriter, r *http.Request) 
 	trimmed := strings.TrimPrefix(r.URL.Path, "/uploads/")
 	if trimmed == "" {
 		writeJSON(w, http.StatusNotFound, messageResponse{Message: "Upload not found."})
+		return
+	}
+
+	if strings.HasSuffix(trimmed, "/ai-analysis") {
+		idText := strings.TrimSuffix(strings.TrimSuffix(trimmed, "/ai-analysis"), "/")
+		uploadID, err := strconv.ParseInt(idText, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, messageResponse{Message: "Invalid upload id."})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, messageResponse{Message: "Method not allowed."})
+			return
+		}
+		app.handleUploadAIAnalysis(w, r, uploadID)
 		return
 	}
 
@@ -474,6 +542,73 @@ func (app *application) handleUploadResults(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (app *application) handleUploadAIAnalysis(w http.ResponseWriter, r *http.Request, uploadID int64) {
+	user := sessionUserFromContext(r.Context())
+	status, found, err := app.fetchUploadStatus(r.Context(), user.ID, uploadID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, messageResponse{Message: "Unable to read upload status."})
+		return
+	}
+	if !found {
+		writeJSON(w, http.StatusNotFound, messageResponse{Message: "Upload not found."})
+		return
+	}
+	if status.Status != "completed" {
+		writeJSON(w, http.StatusConflict, messageResponse{Message: "Upload is not completed yet."})
+		return
+	}
+
+	summary, timeline, charts, err := app.fetchSummary(r.Context(), uploadID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, messageResponse{Message: "Unable to read upload summary."})
+		return
+	}
+	summary.TotalLines = status.TotalLines
+	summary.ParsedPercent = computeParsedPercent(status.TotalLines, summary.TotalRecords)
+
+	findings, err := app.fetchFindings(r.Context(), uploadID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, messageResponse{Message: "Unable to read findings."})
+		return
+	}
+
+	payloadJSON, payloadHash, err := buildAIAnalysisPayload(status, summary, findings, timeline, charts)
+	if err != nil {
+		log.Printf("ai analysis payload error: upload_id=%d user_id=%d err=%v", uploadID, user.ID, err)
+		writeJSON(w, http.StatusInternalServerError, messageResponse{Message: "Unable to prepare AI analysis payload."})
+		return
+	}
+
+	model := selectedAIModel(app.config)
+	store := dbAIAnalysisStore{db: app.db}
+	log.Printf("ai analysis request: upload_id=%d user_id=%d model=%s payload_hash=%s payload_bytes=%d", uploadID, user.ID, model, payloadHash, len(payloadJSON))
+	report, err := getOrCreateAIAnalysis(
+		r.Context(),
+		store,
+		func() (aiAnalysisClient, error) {
+			return newAIAnalysisClient(app.config)
+		},
+		uploadID,
+		payloadHash,
+		payloadJSON,
+		model,
+		time.Now(),
+	)
+	if err != nil {
+		if errors.Is(err, errMissingGeminiAPIKey) || errors.Is(err, errMissingAIAPIKey) {
+			log.Printf("ai analysis config error: upload_id=%d user_id=%d err=%v", uploadID, user.ID, err)
+			writeJSON(w, http.StatusServiceUnavailable, messageResponse{Message: "AI provider API key is not configured."})
+			return
+		}
+		log.Printf("ai analysis generation error: upload_id=%d user_id=%d model=%s err=%v", uploadID, user.ID, model, err)
+		writeJSON(w, http.StatusBadGateway, messageResponse{Message: "Unable to generate AI analysis. Check the API terminal logs for details."})
+		return
+	}
+
+	log.Printf("ai analysis success: upload_id=%d user_id=%d model=%s", uploadID, user.ID, report.Model)
+	writeJSON(w, http.StatusOK, report)
+}
+
 func (app *application) fetchUploadStatus(ctx context.Context, userID, uploadID int64) (uploadStatusResponse, bool, error) {
 	row := app.db.QueryRowContext(ctx, `
 		SELECT id, log_type, file_name, status, created_at, started_at, finished_at, COALESCE(error_message, ''), total_lines, parsed_lines
@@ -611,9 +746,9 @@ func (app *application) fetchFindings(ctx context.Context, uploadID int64) ([]se
 		SELECT type, severity, title, description, first_seen_at, last_seen_at, count, metadata_json
 		FROM findings
 		WHERE upload_id = $1
-		  AND type IN ($2, $3, $4)
+		  AND type IN ($2, $3, $4, $5, $6)
 		ORDER BY count DESC, created_at ASC
-	`, uploadID, findingRejectedTraffic, findingHighPortScan, findingSensitivePort)
+	`, uploadID, findingRejectedTraffic, findingHighPortScan, findingSensitivePort, findingSSHBruteForce, findingSuspiciousProbe)
 	if err != nil {
 		return nil, err
 	}

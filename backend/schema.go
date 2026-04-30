@@ -81,6 +81,14 @@ func initializeDatabase(ctx context.Context, db *sql.DB) error {
 			ai_summary TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`CREATE TABLE IF NOT EXISTS ai_analyses (
+			id BIGSERIAL PRIMARY KEY,
+			upload_id BIGINT NOT NULL UNIQUE REFERENCES uploads(id) ON DELETE CASCADE,
+			model TEXT NOT NULL,
+			report_json JSONB NOT NULL,
+			payload_hash TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 		`DO $$
 		BEGIN
 			IF EXISTS (
@@ -252,6 +260,7 @@ func initializeDatabase(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_uploads_status_created_at ON uploads(status, created_at ASC)`,
 		`CREATE INDEX IF NOT EXISTS idx_event_logs_upload_start_time ON event_logs(upload_id, start_time ASC)`,
 		`CREATE INDEX IF NOT EXISTS idx_findings_upload_created_at ON findings(upload_id, created_at ASC)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_analyses_upload_id ON ai_analyses(upload_id)`,
 	}
 
 	for _, statement := range statements {

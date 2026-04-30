@@ -124,6 +124,99 @@ func TestFindingsAggregatorHighPortScan(t *testing.T) {
 	}
 }
 
+func TestFindingsAggregatorSSHBruteForceExternalSource(t *testing.T) {
+	agg := newFindingsAggregator()
+	port := 22
+	for i := 0; i < sshBruteForceThreshold; i++ {
+		agg.add(&parsedVpcFlowLine{
+			SrcAddr:   "203.0.113.10",
+			DstAddr:   "10.0.1.10",
+			DstPort:   &port,
+			Action:    actionReject,
+			LogStatus: logStatusOK,
+			StartTime: mustUnixTime(t, 1716220000+int64(i)),
+		})
+	}
+
+	finding := findFindingByType(agg.build(), findingSSHBruteForce)
+	if finding == nil {
+		t.Fatalf("expected SSH brute-force finding")
+	}
+	if finding.Count != sshBruteForceThreshold {
+		t.Fatalf("count = %d, want %d", finding.Count, sshBruteForceThreshold)
+	}
+	if finding.Severity != "high" {
+		t.Fatalf("severity = %q, want high", finding.Severity)
+	}
+	if finding.Metadata["service"] != "SSH" {
+		t.Fatalf("service metadata = %v, want SSH", finding.Metadata["service"])
+	}
+}
+
+func TestFindingsAggregatorSSHBruteForceIgnoresInternalSource(t *testing.T) {
+	agg := newFindingsAggregator()
+	port := 22
+	for i := 0; i < sshBruteForceThreshold; i++ {
+		agg.add(&parsedVpcFlowLine{
+			SrcAddr:   "10.0.1.20",
+			DstAddr:   "10.0.1.10",
+			DstPort:   &port,
+			Action:    actionReject,
+			LogStatus: logStatusOK,
+			StartTime: mustUnixTime(t, 1716220000+int64(i)),
+		})
+	}
+
+	if finding := findFindingByType(agg.build(), findingSSHBruteForce); finding != nil {
+		t.Fatalf("unexpected SSH brute-force finding for internal source")
+	}
+}
+
+func TestFindingsAggregatorSuspiciousPortProbe(t *testing.T) {
+	agg := newFindingsAggregator()
+	port := 6379
+	for i := 0; i < suspiciousProbeThreshold; i++ {
+		agg.add(&parsedVpcFlowLine{
+			SrcAddr:   "203.0.113.25",
+			DstAddr:   "10.0.2.15",
+			DstPort:   &port,
+			Action:    actionReject,
+			LogStatus: logStatusOK,
+			StartTime: mustUnixTime(t, 1716220000+int64(i)),
+		})
+	}
+
+	finding := findFindingByType(agg.build(), findingSuspiciousProbe)
+	if finding == nil {
+		t.Fatalf("expected suspicious probe finding")
+	}
+	if finding.Count != suspiciousProbeThreshold {
+		t.Fatalf("count = %d, want %d", finding.Count, suspiciousProbeThreshold)
+	}
+	if finding.Metadata["service"] != "Redis" {
+		t.Fatalf("service metadata = %v, want Redis", finding.Metadata["service"])
+	}
+}
+
+func TestFindingsAggregatorSuspiciousPortProbeBelowThreshold(t *testing.T) {
+	agg := newFindingsAggregator()
+	port := 6379
+	for i := 0; i < suspiciousProbeThreshold-1; i++ {
+		agg.add(&parsedVpcFlowLine{
+			SrcAddr:   "203.0.113.25",
+			DstAddr:   "10.0.2.15",
+			DstPort:   &port,
+			Action:    actionReject,
+			LogStatus: logStatusOK,
+			StartTime: mustUnixTime(t, 1716220000+int64(i)),
+		})
+	}
+
+	if finding := findFindingByType(agg.build(), findingSuspiciousProbe); finding != nil {
+		t.Fatalf("unexpected suspicious probe finding below threshold")
+	}
+}
+
 func TestFindingsAggregatorEmitsAllRejectedSources(t *testing.T) {
 	agg := newFindingsAggregator()
 	srcs := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6"}
@@ -347,4 +440,13 @@ func mustUnixTime(t *testing.T, unix int64) *time.Time {
 	t.Helper()
 	value := time.Unix(unix, 0).UTC()
 	return &value
+}
+
+func findFindingByType(findings []findingRecord, typeValue string) *findingRecord {
+	for i := range findings {
+		if findings[i].Type == typeValue {
+			return &findings[i]
+		}
+	}
+	return nil
 }
