@@ -23,10 +23,6 @@ type config struct {
 }
 
 func loadConfig() config {
-	origins := map[string]struct{}{
-		"http://127.0.0.1:5173": {},
-	}
-
 	return config{
 		AppEnv:             envOrDefault("APP_ENV", "development"),
 		Mode:               envOrDefault("APP_MODE", "api"),
@@ -36,12 +32,25 @@ func loadConfig() config {
 		SessionCookieName:  envOrDefault("SESSION_COOKIE_NAME", "sla_session"),
 		SessionTTL:         parseDuration(envOrDefault("SESSION_TTL", "2h")),
 		WorkerPollInterval: 5 * time.Second,
-		AllowedOrigins:     origins,
+		AllowedOrigins:     parseAllowedOrigins(envOrDefault("ALLOWED_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173")),
 		GeminiAPIKey:       envOrDefault("GEMINI_API_KEY", ""),
 		GeminiModel:        envOrDefault("GEMINI_MODEL", "gemini-2.5-flash"),
 		ClaudeAPIKey:       envOrDefault("ANTHROPIC_API_KEY", ""),
 		ClaudeModel:        envOrDefault("CLAUDE_MODEL", "claude-3-5-haiku-latest"),
 	}
+}
+
+// parseAllowedOrigins converts a comma-separated list of origins into a set.
+// Whitespace and trailing slashes are trimmed; empty entries are skipped.
+func parseAllowedOrigins(raw string) map[string]struct{} {
+	origins := map[string]struct{}{}
+	for _, part := range strings.Split(raw, ",") {
+		origin := strings.TrimRight(strings.TrimSpace(part), "/")
+		if origin != "" {
+			origins[origin] = struct{}{}
+		}
+	}
+	return origins
 }
 
 func envOrDefault(key, fallback string) string {

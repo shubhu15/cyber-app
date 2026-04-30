@@ -239,8 +239,8 @@ func (app *application) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   app.config.AppEnv == "production",
+		SameSite: app.sessionSameSite(),
+		Secure:   app.sessionSecure(),
 		Expires:  time.Now().Add(app.config.SessionTTL),
 		MaxAge:   int(app.config.SessionTTL.Seconds()),
 	})
@@ -269,8 +269,8 @@ func (app *application) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   app.config.AppEnv == "production",
+		SameSite: app.sessionSameSite(),
+		Secure:   app.sessionSecure(),
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
 	})
@@ -315,8 +315,8 @@ func (app *application) handleSessionRefresh(w http.ResponseWriter, r *http.Requ
 		Value:    cookie.Value,
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   app.config.AppEnv == "production",
+		SameSite: app.sessionSameSite(),
+		Secure:   app.sessionSecure(),
 		Expires:  newExpiry,
 		MaxAge:   int(app.config.SessionTTL.Seconds()),
 	})
@@ -899,9 +899,28 @@ func (app *application) createSession(ctx context.Context, userID int64, token s
 	return err
 }
 
+// sessionSameSite picks the right cookie SameSite policy for the environment.
+// Production runs the frontend and API on different domains (e.g. Vercel +
+// Render), which requires SameSite=None;Secure for the browser to send the
+// session cookie at all. Locally we keep Lax so the cookie still works on
+// http:// without the Secure flag.
+func (app *application) sessionSameSite() http.SameSite {
+	if app.config.AppEnv == "production" {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
+}
+
+// sessionSecure mirrors sessionSameSite: SameSite=None requires Secure=true,
+// and we never want Secure on plain http:// dev.
+func (app *application) sessionSecure() bool {
+	return app.config.AppEnv == "production"
+}
+
 func (app *application) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
+		w.Header().Add("Vary", "Origin")
+		origin := strings.TrimRight(r.Header.Get("Origin"), "/")
 		if _, ok := app.config.AllowedOrigins[origin]; ok {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
