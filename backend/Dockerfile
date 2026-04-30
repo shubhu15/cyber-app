@@ -21,6 +21,7 @@ RUN apk add --no-cache ca-certificates tzdata \
  && chown -R app:app /data
 
 COPY --from=build /out/app /usr/local/bin/app
+COPY run-both.sh /usr/local/bin/run-both.sh
 
 USER app
 WORKDIR /home/app
@@ -34,4 +35,4 @@ EXPOSE 8080
 # The same image runs as either the API or the worker.
 # Default = API. Override the command for the worker service:
 #   docker run ... cyber-app-backend worker
-ENTRYPOINT ["/usr/local/bin/app"]
+ENTRYPOINT ["/usr/local/bin/run-both.sh"]
