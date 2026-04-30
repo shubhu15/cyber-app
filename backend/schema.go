@@ -5,6 +5,10 @@ import (
 	"database/sql"
 )
 
+// initializeDatabase is run on every API and worker boot. The CREATE TABLE
+// statements are the single source of truth for the schema and must match
+// what the rest of the package reads/writes. There is no separate migration
+// system: a fresh DB is built from these statements alone.
 func initializeDatabase(ctx context.Context, db *sql.DB) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS users (
@@ -74,11 +78,11 @@ func initializeDatabase(ctx context.Context, db *sql.DB) error {
 			accepted_count INTEGER NOT NULL,
 			rejected_count INTEGER NOT NULL,
 			parse_errors INTEGER NOT NULL,
-			top_src_ips_json JSONB NOT NULL,
-			top_dst_ports_json JSONB NOT NULL,
-			top_rejected_src_ips_json JSONB NOT NULL,
-			timeline_json JSONB NOT NULL,
-			ai_summary TEXT NOT NULL,
+			nodata_count INTEGER NOT NULL DEFAULT 0,
+			skipdata_count INTEGER NOT NULL DEFAULT 0,
+			charts_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+			timeline_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+			ai_summary TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE TABLE IF NOT EXISTS ai_analyses (
@@ -89,172 +93,7 @@ func initializeDatabase(ctx context.Context, db *sql.DB) error {
 			payload_hash TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
-		`DO $$
-		BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'session_hash'
-			) AND NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'token_hash'
-			) THEN
-				ALTER TABLE sessions RENAME COLUMN session_hash TO token_hash;
-			END IF;
-		END $$`,
-		`DO $$
-		BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'uploads' AND column_name = 'original_filename'
-			) AND NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'uploads' AND column_name = 'file_name'
-			) THEN
-				ALTER TABLE uploads RENAME COLUMN original_filename TO file_name;
-			END IF;
-		END $$`,
-		`DO $$
-		BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'uploads' AND column_name = 'completed_at'
-			) AND NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'uploads' AND column_name = 'finished_at'
-			) THEN
-				ALTER TABLE uploads RENAME COLUMN completed_at TO finished_at;
-			END IF;
-		END $$`,
-		`DO $$
-		BEGIN
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'uploads' AND column_name = 'total_lines'
-			) THEN
-				ALTER TABLE uploads ADD COLUMN total_lines INTEGER NOT NULL DEFAULT 0;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'uploads' AND column_name = 'parsed_lines'
-			) THEN
-				ALTER TABLE uploads ADD COLUMN parsed_lines INTEGER NOT NULL DEFAULT 0;
-			END IF;
-		END $$`,
-		`DO $$
-		BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'findings' AND column_name = 'event_count'
-			) AND NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'findings' AND column_name = 'count'
-			) THEN
-				ALTER TABLE findings RENAME COLUMN event_count TO count;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'findings' AND column_name = 'first_seen_at'
-			) THEN
-				ALTER TABLE findings ADD COLUMN first_seen_at TIMESTAMPTZ NULL;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'findings' AND column_name = 'last_seen_at'
-			) THEN
-				ALTER TABLE findings ADD COLUMN last_seen_at TIMESTAMPTZ NULL;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'findings' AND column_name = 'metadata_json'
-			) THEN
-				ALTER TABLE findings ADD COLUMN metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
-			END IF;
-		END $$`,
-		`DO $$
-		BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'total_events'
-			) AND NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'total_records'
-			) THEN
-				ALTER TABLE summaries RENAME COLUMN total_events TO total_records;
-			END IF;
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'summary_text'
-			) AND NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'ai_summary'
-			) THEN
-				ALTER TABLE summaries RENAME COLUMN summary_text TO ai_summary;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'accepted_count'
-			) THEN
-				ALTER TABLE summaries ADD COLUMN accepted_count INTEGER NOT NULL DEFAULT 0;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'rejected_count'
-			) THEN
-				ALTER TABLE summaries ADD COLUMN rejected_count INTEGER NOT NULL DEFAULT 0;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'top_src_ips_json'
-			) THEN
-				ALTER TABLE summaries ADD COLUMN top_src_ips_json JSONB NOT NULL DEFAULT '[]'::jsonb;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'top_dst_ports_json'
-			) THEN
-				ALTER TABLE summaries ADD COLUMN top_dst_ports_json JSONB NOT NULL DEFAULT '[]'::jsonb;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'top_rejected_src_ips_json'
-			) THEN
-				ALTER TABLE summaries ADD COLUMN top_rejected_src_ips_json JSONB NOT NULL DEFAULT '[]'::jsonb;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'timeline_json'
-			) THEN
-				ALTER TABLE summaries ADD COLUMN timeline_json JSONB NOT NULL DEFAULT '[]'::jsonb;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'ai_summary'
-			) THEN
-				ALTER TABLE summaries ADD COLUMN ai_summary TEXT NOT NULL DEFAULT '';
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'nodata_count'
-			) THEN
-				ALTER TABLE summaries ADD COLUMN nodata_count INTEGER NOT NULL DEFAULT 0;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'skipdata_count'
-			) THEN
-				ALTER TABLE summaries ADD COLUMN skipdata_count INTEGER NOT NULL DEFAULT 0;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = 'public' AND table_name = 'summaries' AND column_name = 'charts_json'
-			) THEN
-				ALTER TABLE summaries ADD COLUMN charts_json JSONB NOT NULL DEFAULT '{}'::jsonb;
-			END IF;
-			ALTER TABLE summaries ALTER COLUMN top_src_ips_json DROP NOT NULL;
-			ALTER TABLE summaries ALTER COLUMN top_dst_ports_json DROP NOT NULL;
-			ALTER TABLE summaries ALTER COLUMN top_rejected_src_ips_json DROP NOT NULL;
-			ALTER TABLE summaries ALTER COLUMN timeline_json DROP NOT NULL;
-		END $$`,
+
 		`CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_uploads_user_created_at ON uploads(user_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_uploads_status_created_at ON uploads(status, created_at ASC)`,
