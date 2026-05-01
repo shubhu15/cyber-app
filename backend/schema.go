@@ -5,6 +5,12 @@ import (
 	"database/sql"
 )
 
+// schemaBootstrapLockKey is an arbitrary constant used with pg_advisory_xact_lock
+// to serialize concurrent boots of the API and worker (which both call
+// initializeDatabase). Without it, two processes can race on CREATE TABLE
+// IF NOT EXISTS and one fails with a pg_class_relname_nsp_index unique-violation.
+const schemaBootstrapLockKey int64 = 0x736c615f696e6974 // "sla_init"
+
 // initializeDatabase is run on every API and worker boot. The CREATE TABLE
 // statements are the single source of truth for the schema and must match
 // what the rest of the package reads/writes. There is no separate migration
@@ -102,11 +108,21 @@ func initializeDatabase(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_ai_analyses_upload_id ON ai_analyses(upload_id)`,
 	}
 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", schemaBootstrapLockKey); err != nil {
+		return err
+	}
+
 	for _, statement := range statements {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return err
 		}
 	}
 
-	return nil
+	return tx.Commit()
 }

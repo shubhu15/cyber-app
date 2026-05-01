@@ -1,0 +1,3 @@
+# Order matters: the API proxy MUST come before the SPA catch-all.
+/api/*    https://cyber-app-api.onrender.com/:splat    200
+/*        /index.html                                   200
