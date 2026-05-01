@@ -344,12 +344,14 @@ function TrafficPieChart(props: { buckets: InternalExternalBucket[] }) {
               ))}
             </Pie>
             <Tooltip
-              content={(tooltipProps: {
-                active?: boolean;
-                payload?: Array<{ payload: PiePayload }>;
-              }) => {
-                if (!tooltipProps.active || !tooltipProps.payload?.length) return null;
-                const item = tooltipProps.payload[0].payload;
+              content={(tooltipProps) => {
+                const { active, payload } = tooltipProps as {
+                  active?: boolean;
+                  payload?: ReadonlyArray<{ payload?: unknown }>;
+                };
+                if (!active || !payload?.length) return null;
+                const item = payload[0]?.payload as PiePayload | undefined;
+                if (!item) return null;
                 return (
                   <div className="recharts-custom-tooltip">
                     <strong>{item.name}</strong>
