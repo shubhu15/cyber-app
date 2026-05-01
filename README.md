@@ -10,7 +10,7 @@ Small full-stack log analysis app with:
 ## Current behavior
 
 - Register and log in (email + password)
-- Upload a single VPC flow log file and wait for processing
+- Upload a single VPC flow log file and wait for processing — **`backend/testdata/vpc_flow_logs_sample.log`** in this repo is a ready-made file you can upload to try parsing
 - Browse findings, timeline, charts, and raw parsed rows
 - Run **AI analysis** if `ANTHROPIC_API_KEY` is set (Docker: in `docker-compose.yml` for the `backend` service)
 
@@ -56,8 +56,7 @@ Stop with `Ctrl+C` in each terminal and `make db-stop` if you used the Makefile 
 |--------|------|
 | `frontend/` | Vite + React app |
 | `backend/` | API, worker, parser, Postgres schema, Docker image |
-
-Sample log for testing: `backend/testdata/sample-vpc-flow.log`
+| `backend/testdata/` | Sample VPC flow log (`vpc_flow_logs_sample.log`) — safe to commit; use it when testing uploads and parsing |
 
 ---
 
