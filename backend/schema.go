@@ -11,10 +11,7 @@ import (
 // IF NOT EXISTS and one fails with a pg_class_relname_nsp_index unique-violation.
 const schemaBootstrapLockKey int64 = 0x736c615f696e6974 // "sla_init"
 
-// initializeDatabase is run on every API and worker boot. The CREATE TABLE
-// statements are the single source of truth for the schema and must match
-// what the rest of the package reads/writes. There is no separate migration
-// system: a fresh DB is built from these statements alone.
+
 func initializeDatabase(ctx context.Context, db *sql.DB) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS users (

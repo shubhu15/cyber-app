@@ -59,13 +59,6 @@ func TestParseVpcFlowLineAllowsPlaceholders(t *testing.T) {
 	}
 }
 
-func TestProtocolLabel(t *testing.T) {
-	value := 6
-	if got := protocolLabel(&value); got != "TCP" {
-		t.Fatalf("protocolLabel() = %q", got)
-	}
-}
-
 func TestFindingsAggregatorRejectedTraffic(t *testing.T) {
 	agg := newFindingsAggregator()
 	for i := 0; i < 4; i++ {

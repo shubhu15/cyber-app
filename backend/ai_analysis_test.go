@@ -70,46 +70,30 @@ func TestBuildAIAnalysisPayloadSanitizesAndExcludesRawEvents(t *testing.T) {
 	}
 }
 
-func TestNewGeminiClientRequiresAPIKey(t *testing.T) {
-	_, err := newGeminiClient(config{GeminiModel: "gemini-2.5-flash"})
-	if !errors.Is(err, errMissingGeminiAPIKey) {
-		t.Fatalf("error = %v, want errMissingGeminiAPIKey", err)
-	}
-}
-
-func TestNewAIAnalysisClientPrefersClaude(t *testing.T) {
-	client, err := newAIAnalysisClient(config{
-		GeminiAPIKey: "gemini-key",
-		GeminiModel:  "gemini-2.5-flash",
-		ClaudeAPIKey: "claude-key",
+func TestNewClaudeClientReturnsConfiguredClient(t *testing.T) {
+	client, err := newClaudeClient(config{
+		ClaudeAPIKey: "sk-test",
 		ClaudeModel:  "claude-3-5-haiku-latest",
 	})
 	if err != nil {
-		t.Fatalf("newAIAnalysisClient error: %v", err)
+		t.Fatalf("newClaudeClient error: %v", err)
 	}
 	if _, ok := client.(*claudeClient); !ok {
 		t.Fatalf("client type = %T, want *claudeClient", client)
 	}
-	if got := selectedAIModel(config{GeminiModel: "gemini-2.5-flash", ClaudeAPIKey: "claude-key", ClaudeModel: "claude-test"}); got != "claude-test" {
+}
+
+func TestSelectedAIModelDefaultAndOverride(t *testing.T) {
+	if got := selectedAIModel(config{}); got != "claude-3-5-haiku-latest" {
+		t.Fatalf("selectedAIModel = %q, want default haiku", got)
+	}
+	if got := selectedAIModel(config{ClaudeModel: "claude-test"}); got != "claude-test" {
 		t.Fatalf("selectedAIModel = %q, want claude-test", got)
 	}
 }
 
-func TestNewAIAnalysisClientFallsBackToGemini(t *testing.T) {
-	client, err := newAIAnalysisClient(config{
-		GeminiAPIKey: "gemini-key",
-		GeminiModel:  "gemini-2.5-flash",
-	})
-	if err != nil {
-		t.Fatalf("newAIAnalysisClient error: %v", err)
-	}
-	if _, ok := client.(*geminiClient); !ok {
-		t.Fatalf("client type = %T, want *geminiClient", client)
-	}
-}
-
-func TestNewAIAnalysisClientRequiresAnyProviderKey(t *testing.T) {
-	_, err := newAIAnalysisClient(config{})
+func TestNewClaudeClientRequiresAnthropicKey(t *testing.T) {
+	_, err := newClaudeClient(config{})
 	if !errors.Is(err, errMissingAIAPIKey) {
 		t.Fatalf("error = %v, want errMissingAIAPIKey", err)
 	}
@@ -123,7 +107,7 @@ func TestGetOrCreateAIAnalysisReturnsCachedReportWithoutClient(t *testing.T) {
 			Threats:            []string{},
 			FalsePositives:     []string{},
 			RecommendedActions: []string{},
-			Model:              "gemini-2.5-flash",
+			Model:              "claude-3-5-haiku-latest",
 			GeneratedAt:        time.Unix(1716220000, 0).UTC().Format(time.RFC3339),
 		},
 	}
@@ -139,7 +123,7 @@ func TestGetOrCreateAIAnalysisReturnsCachedReportWithoutClient(t *testing.T) {
 		7,
 		"hash",
 		[]byte(`{}`),
-		"gemini-2.5-flash",
+		"claude-3-5-haiku-latest",
 		time.Now(),
 	)
 	if err != nil {
@@ -177,7 +161,7 @@ func TestGetOrCreateAIAnalysisStoresGeneratedReport(t *testing.T) {
 		7,
 		"hash",
 		[]byte(`{"summary":{"total_records":10}}`),
-		"gemini-2.5-flash",
+		"claude-3-5-haiku-latest",
 		generatedAt,
 	)
 	if err != nil {
@@ -189,7 +173,7 @@ func TestGetOrCreateAIAnalysisStoresGeneratedReport(t *testing.T) {
 	if !store.stored {
 		t.Fatalf("expected report to be stored")
 	}
-	if report.Model != "gemini-2.5-flash" {
+	if report.Model != "claude-3-5-haiku-latest" {
 		t.Fatalf("model = %q", report.Model)
 	}
 	if report.GeneratedAt != generatedAt.Format(time.RFC3339) {

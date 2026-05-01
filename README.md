@@ -11,17 +11,15 @@ Small full-stack log analysis app with:
 
 - Register with `email + password`
 - Login with Basic Auth
-- Receive an HttpOnly session cookie
 - Upload one AWS VPC Flow Log text file
-- Poll upload status until processing finishes
+- Upload status polls until processing finishes
 - View findings, timeline entries, charts, and parsed flow records
+- Click ai-analysis for ai-generated findings 
 
 ## Project layout
 
 - `frontend/` - Vite React app
 - `backend/` - Go API, worker, parser, storage, schema, and tests
-- `backend/dev.env` - local backend environment values
-- `frontend/.env.development` - frontend API URL for Vite dev mode
 
 ## One-time setup
 
@@ -149,7 +147,7 @@ The Dockerfiles in `backend/` and `frontend/` are host-agnostic: the same images
 | `UPLOAD_DIR` | `/data/uploads` | Mount a persistent disk here on both API and worker |
 | `ALLOWED_ORIGINS` | `https://your-app.vercel.app` | Comma-separated allowlist; required for the browser to send the session cookie |
 | `APP_MODE` | `api` (web) / `worker` (worker) | Passed as the container command on the worker service |
-| `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` | (your keys) | Optional, only if AI analysis is enabled |
+| `ANTHROPIC_API_KEY` | (your key) | Optional; omit to disable AI analysis |
 
 For the frontend, set `VITE_API_BASE_URL` at **build time** (Vite inlines it into the bundle) to your API's public URL, e.g. `https://your-api.onrender.com`.
 

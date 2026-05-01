@@ -16,8 +16,6 @@ type config struct {
 	SessionTTL         time.Duration
 	WorkerPollInterval time.Duration
 	AllowedOrigins     map[string]struct{}
-	GeminiAPIKey       string
-	GeminiModel        string
 	ClaudeAPIKey       string
 	ClaudeModel        string
 }
@@ -33,8 +31,6 @@ func loadConfig() config {
 		SessionTTL:         parseDuration(envOrDefault("SESSION_TTL", "2h")),
 		WorkerPollInterval: 5 * time.Second,
 		AllowedOrigins:     parseAllowedOrigins(envOrDefault("ALLOWED_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173")),
-		GeminiAPIKey:       envOrDefault("GEMINI_API_KEY", ""),
-		GeminiModel:        envOrDefault("GEMINI_MODEL", "gemini-2.5-flash"),
 		ClaudeAPIKey:       envOrDefault("ANTHROPIC_API_KEY", ""),
 		ClaudeModel:        envOrDefault("CLAUDE_MODEL", "claude-3-5-haiku-latest"),
 	}

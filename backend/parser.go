@@ -937,23 +937,6 @@ func topCountPairs(source map[string]int64, limit int) []countPair {
 	return pairs
 }
 
-func topCountPairsFromIntMap(source map[string]int, limit int) []countPair {
-	pairs := make([]countPair, 0, len(source))
-	for label, count := range source {
-		pairs = append(pairs, countPair{label: label, count: int64(count)})
-	}
-	sort.Slice(pairs, func(i, j int) bool {
-		if pairs[i].count == pairs[j].count {
-			return pairs[i].label < pairs[j].label
-		}
-		return pairs[i].count > pairs[j].count
-	})
-	if len(pairs) > limit {
-		return pairs[:limit]
-	}
-	return pairs
-}
-
 func toChartPoints(pairs []countPair) []chartPoint {
 	points := make([]chartPoint, 0, len(pairs))
 	for _, pair := range pairs {
@@ -988,21 +971,5 @@ func findingSeverityRank(value string) int {
 		return 2
 	default:
 		return 1
-	}
-}
-
-func protocolLabel(value *int) string {
-	if value == nil {
-		return "-"
-	}
-	switch *value {
-	case 1:
-		return "ICMP"
-	case 6:
-		return "TCP"
-	case 17:
-		return "UDP"
-	default:
-		return strconv.Itoa(*value)
 	}
 }

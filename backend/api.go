@@ -586,7 +586,7 @@ func (app *application) handleUploadAIAnalysis(w http.ResponseWriter, r *http.Re
 		r.Context(),
 		store,
 		func() (aiAnalysisClient, error) {
-			return newAIAnalysisClient(app.config)
+			return newClaudeClient(app.config)
 		},
 		uploadID,
 		payloadHash,
@@ -595,7 +595,7 @@ func (app *application) handleUploadAIAnalysis(w http.ResponseWriter, r *http.Re
 		time.Now(),
 	)
 	if err != nil {
-		if errors.Is(err, errMissingGeminiAPIKey) || errors.Is(err, errMissingAIAPIKey) {
+		if errors.Is(err, errMissingAIAPIKey) {
 			log.Printf("ai analysis config error: upload_id=%d user_id=%d err=%v", uploadID, user.ID, err)
 			writeJSON(w, http.StatusServiceUnavailable, messageResponse{Message: "AI provider API key is not configured."})
 			return
