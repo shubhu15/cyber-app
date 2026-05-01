@@ -9,155 +9,70 @@ Small full-stack log analysis app with:
 
 ## Current behavior
 
-- Register with `email + password`
-- Login with Basic Auth
-- Upload one AWS VPC Flow Log text file
-- Upload status polls until processing finishes
-- View findings, timeline entries, charts, and parsed flow records
-- Click ai-analysis for ai-generated findings 
-
-## Project layout
-
-- `frontend/` - Vite React app
-- `backend/` - Go API, worker, parser, storage, schema, and tests
-
-## One-time setup
-
-Install frontend packages:
-
-```bash
-cd frontend
-npm install
-```
-
-Create the local Postgres cluster once:
-
-```bash
-make db-init
-```
-
-That script will:
-- create the local Postgres cluster if missing
-- start Postgres if needed
-- create the `simple_log_analyser` database if missing
-
-## Start the app
-
-Open four terminals from the project root.
+- Register and log in (email + password)
+- Upload a single VPC flow log file and wait for processing
+- Browse findings, timeline, charts, and raw parsed rows
+- Run **AI analysis** if `ANTHROPIC_API_KEY` is set (Docker: in `docker-compose.yml` for the `backend` service)
 
 
-### 1. Start Postgres
+## Run with Docker (simplest path)
 
-```bash
-make db-start
-```
-
-### 2. Start the API
-
-```bash
-make api
-```
-
-### 3. Start the worker
-
-```bash
-make worker
-```
-
-### 4. Start the frontend
-
-```bash
-make frontend
-```
-
-## App URLs
-
-- Frontend: `http://127.0.0.1:5173/`
-- API health: `http://127.0.0.1:8080/health`
-
-## Stop the app
-
-Stop frontend, API, and worker with `Ctrl+C` in their terminals.
-
-Stop Postgres with:
-
-```bash
-make db-stop
-```
-
-## Useful commands
-
-Run frontend build:
-
-```bash
-make build
-```
-
-Run backend tests:
-
-```bash
-make test
-```
-
-## Sample test file
-
-A sample VPC flow log file is available at:
-
-`backend/testdata/sample-vpc-flow.log`
-
-## Notes
-
-- `frontend/.env.development` points the Vite app at `http://127.0.0.1:8080`
-- `backend/dev.env` sets `DATABASE_URL`, `UPLOAD_DIR`, `GOCACHE`, `HTTP_ADDR`, and `ALLOWED_ORIGINS`
-- `make api` and `make worker` load `backend/dev.env` for you
-- The worker expects the AWS default VPC Flow Logs v2 record format in this phase
-
-## Run with Docker (one command)
-
-If you don't want the four-terminal dance, the whole stack runs in containers:
-
+Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes Docker Compose).
+From the project root:
 ```bash
 docker compose up --build
 ```
 
-That starts:
+**You do not need** a local Postgres install, `npm`, or Go tooling for this. Compose builds and runs everything for you.
 
-- `postgres`  on `localhost:5432` (data persisted in the `pgdata` volume)
-- `api`       on `http://localhost:8080`
-- `worker`    in the background (no exposed port)
-- `frontend`  on `http://localhost:5173`
+| What | URL |
+|------|-----|
+| App (UI) | http://localhost:5173 |
+| API | http://localhost:8080 |
+| Health check | http://localhost:8080/health |
 
-The API and worker share an `uploads` volume so the worker can read what the API wrote. Postgres data and uploads survive `docker compose down`; use `docker compose down -v` to wipe them.
+**Behind the scenes:** one **backend** container runs the HTTP server and the log-processing worker together; Postgres and the uploads folder stay in Docker volumes.
 
-## Deployment
+- **`docker compose down`** — stops containers; Postgres data and uploads are kept until you wipe volumes.
+- **`docker compose down -v`** — also deletes those volumes (fresh start).
 
-The app is split into four moving parts:
+---
 
-1. **Frontend** — React static bundle. Build with `npm run build`, serve the `dist/` folder.
-2. **API** — Go HTTP server, long-running.
-3. **Worker** — Go process that polls the DB. Long-running, must always be up.
-4. **Postgres** — managed DB.
+## Optional: run without Docker
 
-The Dockerfiles in `backend/` and `frontend/` are host-agnostic: the same images run on Render, Railway, Fly.io, a VPS with Docker, or anywhere else that runs containers. Whichever host you choose, set these production env vars on the API + worker:
+Use this when you want to edit code and run processes directly on your machine (hot reload for the UI, `go run`, etc.).
 
-| Variable | Example | Notes |
-|---|---|---|
-| `APP_ENV` | `production` | Switches cookies to `SameSite=None; Secure` |
-| `DATABASE_URL` | `postgres://user:pass@host/db?sslmode=require` | From your managed Postgres provider |
-| `UPLOAD_DIR` | `/data/uploads` | Mount a persistent disk here on both API and worker |
-| `ALLOWED_ORIGINS` | `https://your-app.vercel.app` | Comma-separated allowlist; required for the browser to send the session cookie |
-| `APP_MODE` | `api` (web) / `worker` (worker) | Passed as the container command on the worker service |
-| `ANTHROPIC_API_KEY` | (your key) | Optional; omit to disable AI analysis |
+1. **Postgres** — install and start it, or use `make db-init` / `make db-start` from the repo `Makefile` if you use that workflow.
+2. **Backend** — copy `backend/dev.env.example` to `backend/dev.env` and adjust paths/URLs. In one terminal: `make api`. In another: `make worker`.
+3. **Frontend** — `cd frontend && npm install && npm run dev` (uses `frontend/.env.development` to talk to the API on port 8080).
 
-For the frontend, set `VITE_API_BASE_URL` at **build time** (Vite inlines it into the bundle) to your API's public URL, e.g. `https://your-api.onrender.com`.
+Stop with `Ctrl+C` in each terminal and `make db-stop` if you used the Makefile for Postgres.
 
-### Database in production
+---
 
-You don't ship `users.db` or any local Postgres data. Schema is auto-created on first boot via `initializeDatabase()` in `backend/main.go`. So the deploy flow is:
+## Project layout
 
-1. Provision a managed Postgres (Neon, Render Postgres, Supabase, RDS, etc.).
-2. Copy its connection string into `DATABASE_URL`.
-3. Boot the API once — it creates all tables.
-4. Boot the worker — it picks up uploads from the shared `UPLOAD_DIR` volume.
+| Folder | Role |
+|--------|------|
+| `frontend/` | Vite + React app |
+| `backend/` | API, worker, parser, Postgres schema, Docker image |
 
-The local `backend/users.db` file is a leftover from an earlier SQLite version and is not used; it's already gitignored.
+Sample log for testing: `backend/testdata/sample-vpc-flow.log`
+
+---
+
+## Important env vars for the **backend** container:
+
+| Variable | Purpose |
+|----------|---------|
+| `DATABASE_URL` | Postgres connection string |
+| `UPLOAD_DIR` | Where uploaded `.log` files live (persist this directory) |
+| `ALLOWED_ORIGINS` | Comma-separated frontend URLs allowed to send cookies (CORS/credentials) |
+| `APP_ENV` | Use `production` for secure cross-site cookies |
+| `ANTHROPIC_API_KEY` | Optional; enables AI analysis from the UI |
+
+For the frontend image or build pipeline, set **`VITE_API_BASE_URL`** at **build time** to your public API URL (for example `https://api.example.com`). Vite bakes this into the JavaScript bundle.
+
+## Development attribution
+
+This project was scoped and designed deliberately before coding. Implementation then **iterated with AI-assisted tooling**: **Cursor** and **Claude Code** were used to draft features, refactor, review suggestions, and help with commits. Human judgment applied throughout; nonetheless, much of the code was produced or revised with AI collaboration and should be read with that context in mind.

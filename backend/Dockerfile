@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.6
 
 # ---- build stage ----------------------------------------------------------
 FROM golang:1.24-alpine AS build
@@ -33,7 +32,6 @@ ENV APP_MODE=api \
 
 EXPOSE 8080
 
-# The same image runs as either the API or the worker.
-# Default = API. Override the command for the worker service:
-#   docker run ... cyber-app-backend worker
+# One process tree: worker in background + HTTP API in foreground (see run-both.sh).
+# For API-only or worker-only, override: docker run ... /usr/local/bin/app api   (or worker)
 ENTRYPOINT ["/usr/local/bin/run-both.sh"]

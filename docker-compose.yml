@@ -3,13 +3,11 @@
 # Tear it down + wipe volumes with:      docker compose down -v
 #
 # Services:
-#   postgres  -- database (data persisted in the `pgdata` volume)
-#   api       -- Go HTTP API on http://localhost:8080
-#   worker    -- Go background worker (no exposed port, polls the DB)
-#   frontend  -- nginx serving the built React SPA on http://localhost:5173
+#   postgres     -- database (data persisted in the `pgdata` volume)
+#   backend      -- Go API + worker in one container (:8080; worker polls DB inside same container)
+#   frontend     -- nginx serving the built React SPA on http://localhost:5173
 #
-# api and worker share the `uploads` volume so the worker can read the
-# files the API wrote. Do not split this volume.
+# The backend service mounts `uploads` so both API and embedded worker share the upload directory.
 
 services:
   postgres:
@@ -30,45 +28,26 @@ services:
       timeout: 3s
       retries: 10
 
-  api:
+  backend:
     build:
       context: ./backend
-    container_name: cyber_app_api
+    container_name: cyber_app_backend
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       APP_ENV: development
-      APP_MODE: api
-      HTTP_ADDR: ":8080"
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/simple_log_analyser?sslmode=disable
+      HTTP_ADDR: ":8080"
       UPLOAD_DIR: /data/uploads
       ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
       SESSION_TTL: 2h
-      # Optional Anthropic API key — leave empty to disable AI analysis.
       ANTHROPIC_API_KEY: ""
     volumes:
       - uploads:/data/uploads
     ports:
       - "8080:8080"
-
-  worker:
-    build:
-      context: ./backend
-    container_name: cyber_app_worker
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: ["worker"]
-    environment:
-      APP_ENV: development
-      APP_MODE: worker
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/simple_log_analyser?sslmode=disable
-      ANTHROPIC_API_KEY: ""
-    volumes:
-      - uploads:/data/uploads
 
   frontend:
     build:
@@ -79,7 +58,7 @@ services:
     container_name: cyber_app_frontend
     restart: unless-stopped
     depends_on:
-      - api
+      - backend
     ports:
       - "5173:80"
 
