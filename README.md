@@ -1,5 +1,11 @@
 # Simple Log Analyser
 
+**Live on Render:** [cyber-app-frontend.onrender.com](https://cyber-app-frontend.onrender.com/) (free-tier hosting).
+
+_Render’s free tier **spins inactive instances down**; the first visit after idle time can wake them cold-start and delay responses — often **around 50 seconds or more**. Try again once things are warm if the UI or API feels slow._
+
+---
+
 Small full-stack log analysis app with:
 - React + TypeScript frontend
 - Go API
